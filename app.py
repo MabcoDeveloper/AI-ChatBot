@@ -3,7 +3,7 @@
 Arabic Beauty Chatbot API - Fixed Version
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
@@ -67,6 +67,15 @@ class HealthResponse(BaseModel):
     products_count: int
     offers_count: int
 
+
+class CartAddRequest(BaseModel):
+    product_id: str
+    quantity: Optional[int] = 1
+    cart_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    phone: Optional[str] = None
+
+
 # Track startup time
 startup_time = datetime.now()
 
@@ -129,12 +138,13 @@ async def health_check():
         )
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, background_tasks: BackgroundTasks = None):
+async def chat(request: ChatRequest, response: Response, background_tasks: BackgroundTasks = None):
     """
     Main chat endpoint - FIXED to work with your UI
     
     Your UI sends: { user_id, message, timestamp }
     We ignore session_data if present
+    This endpoint will also set a cookie if chatbot returns `data['set_cookie']`.
     """
     start_time = time.time()
     
@@ -147,6 +157,18 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks = None):
             user_id=request.user_id,
             message=request.message
         )
+        
+        # If the chatbot included set_cookie directives, set them on the response
+        try:
+            sc = (result.get('data') or {}).get('set_cookie')
+            if sc and isinstance(sc, dict):
+                cookie_name = sc.get('name', 'cart_id')
+                cookie_value = sc.get('value')
+                max_age = sc.get('max_age', 30*24*3600)
+                # set HTTP-only cookie so UI JavaScript cannot read it if not necessary
+                response.set_cookie(key=cookie_name, value=cookie_value, max_age=max_age, httponly=True)
+        except Exception as e:
+            logger.debug(f"Failed to set cookie from chatbot result: {e}")
         
         # Calculate processing time
         processing_time_ms = (time.time() - start_time) * 1000
@@ -221,6 +243,43 @@ async def seed_database():
         "message": "Database seeded with sample data" if success else "Failed to seed database",
         "timestamp": datetime.now().isoformat()
     }
+
+
+@app.post("/cart/add")
+async def add_to_cart(req: CartAddRequest, response: Response):
+    """Add a product to a shopping cart. Accepts either cart_id or (customer_name + phone). Returns updated cart and sets a cookie with `cart_id`."""
+    try:
+        if req.cart_id:
+            cart = mongo_service.get_cart_by_id(req.cart_id)
+            if not cart:
+                raise HTTPException(status_code=404, detail="Cart not found")
+        elif req.customer_name and req.phone:
+            cart = mongo_service.get_or_create_cart_by_customer(req.customer_name, req.phone)
+        else:
+            raise HTTPException(status_code=400, detail="Provide cart_id or customer_name and phone")
+
+        updated = mongo_service.add_item_to_cart(cart['cart_id'], req.product_id, req.quantity)
+        response.set_cookie(key='cart_id', value=updated['cart_id'], max_age=30*24*3600, httponly=True)
+        return {"success": True, "cart": updated}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Add to cart failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/cart")
+async def get_cart(cart_id: Optional[str] = None, customer_name: Optional[str] = None, phone: Optional[str] = None):
+    """Get cart by cart_id or by customer_name + phone"""
+    if cart_id:
+        cart = mongo_service.get_cart_by_id(cart_id)
+    elif customer_name and phone:
+        cart = mongo_service.get_cart_by_customer(customer_name, phone)
+    else:
+        raise HTTPException(status_code=400, detail="Provide cart_id or customer_name and phone")
+    if not cart:
+        raise HTTPException(status_code=404, detail="Cart not found")
+    return {"cart": cart}
 
 @app.get("/test")
 async def test_endpoint():

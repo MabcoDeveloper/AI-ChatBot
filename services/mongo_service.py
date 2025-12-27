@@ -40,6 +40,8 @@ class MongoDBService:
             # Collections
             self.products: Collection = self.db['products']
             self.offers: Collection = self.db['offers']
+            # Carts collection to store customer shopping carts
+            self.carts: Collection = self.db['carts']
             
             # Create indexes
             self._create_indexes()
@@ -77,6 +79,16 @@ class MongoDBService:
             for index_name, fields in indexes_to_create:
                 if index_name not in self.products.index_information():
                     self.products.create_index(fields, name=index_name)
+
+            # Carts indexes
+            try:
+                carts_indexes = self.carts.index_information()
+                if "cart_id_idx" not in carts_indexes:
+                    self.carts.create_index([("cart_id", ASCENDING)], name="cart_id_idx", unique=True)
+                if "customer_phone_idx" not in carts_indexes:
+                    self.carts.create_index([("customer.phone", ASCENDING)], name="customer_phone_idx")
+            except Exception as e:
+                logger.debug(f"Could not create carts indexes: {e}")
             
             logger.info("✅ MongoDB indexes created/verified")
             
@@ -135,10 +147,10 @@ class MongoDBService:
             }
         )
 
-        # Apply sorting if requested
-        if sort_by == 'price':
+        # Apply sorting if requested (support sorting by price, rating, etc.)
+        if sort_by:
             order = ASCENDING if sort_order == 1 else DESCENDING
-            cursor = cursor.sort('price', order)
+            cursor = cursor.sort(sort_by, order)
 
         cursor = cursor.limit(limit)
         
@@ -368,7 +380,68 @@ class MongoDBService:
     def count_products(self) -> int:
         """Count total products in database"""
         return self.products.count_documents({})
-    
+
+    # --- Shopping cart helpers ---
+    def create_cart(self, customer_name: str, phone: str) -> Dict[str, Any]:
+        """Create a new shopping cart for a customer"""
+        import uuid
+        cart_id = str(uuid.uuid4())
+        cart = {
+            "cart_id": cart_id,
+            "customer": {"name": customer_name, "phone": phone},
+            "items": [],
+            "currency": "SAR",
+            "created_at": datetime.now(),
+            "updated_at": datetime.now()
+        }
+        self.carts.insert_one(cart)
+        return self.get_cart_by_id(cart_id)
+
+    def get_cart_by_id(self, cart_id: str) -> Optional[Dict[str, Any]]:
+        return self.carts.find_one({"cart_id": cart_id}, {"_id": 0})
+
+    def get_cart_by_customer(self, name: str, phone: str) -> Optional[Dict[str, Any]]:
+        # case-insensitive name match and phone match
+        return self.carts.find_one({
+            "customer.name": {"$regex": f"^{re.escape((name or '').strip())}$", "$options": "i"},
+            "customer.phone": {"$regex": re.escape((phone or '').strip())}
+        }, {"_id": 0})
+
+    def get_or_create_cart_by_customer(self, name: str, phone: str) -> Dict[str, Any]:
+        cart = self.get_cart_by_customer(name, phone)
+        if cart:
+            return cart
+        return self.create_cart(name, phone)
+
+    def add_item_to_cart(self, cart_id: str, product_id: str, quantity: int = 1) -> Dict[str, Any]:
+        """Add a product to the cart, include item snapshot for price stability"""
+        product = self.get_product_by_id(product_id)
+        if not product:
+            raise Exception("Product not found")
+        item = {
+            "product_id": product.get('product_id'),
+            "name": product.get('name'),
+            "price": product.get('price'),
+            "currency": product.get('currency') or 'SAR',
+            "quantity": int(quantity),
+            "added_at": datetime.now()
+        }
+        self.carts.update_one({"cart_id": cart_id}, {"$push": {"items": item}, "$set": {"updated_at": datetime.now()}})
+        cart = self.get_cart_by_id(cart_id)
+        # compute subtotal
+        subtotal = sum([(it.get('price') or 0) * (it.get('quantity') or 1) for it in cart.get('items', [])])
+        cart['subtotal'] = subtotal
+        return cart
+
+    def get_cart_summary(self, cart_id: str) -> Optional[Dict[str, Any]]:
+        cart = self.get_cart_by_id(cart_id)
+        if not cart:
+            return None
+        subtotal = sum([(it.get('price') or 0) * (it.get('quantity') or 1) for it in cart.get('items', [])])
+        cart['subtotal'] = subtotal
+        cart['items_count'] = sum([it.get('quantity') or 1 for it in cart.get('items', [])])
+        return cart
+
     def close(self):
         """Close MongoDB connection"""
         if hasattr(self, 'client'):
