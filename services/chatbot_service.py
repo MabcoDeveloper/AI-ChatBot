@@ -51,11 +51,17 @@ class IntentDetector:
         self.thanks_keywords = ["شكرا", "شكراً", "شكرا جزيلا", "شكرا لك", "ممنون", "مشكور", "تسلم", "جزاك", "مع السلامة", "وداعا", "bye", "thanks", "thank you"]
         # Buy / add to cart keywords
         self.buy_keywords = ["اشتري", "شراء", "اضف للسلة", "اضف الى السلة", "اضف للعربة", "أضيف", "اضافة للسلة", "اشتريه", "أريد شراء"]
+        # End session keywords
+        self.end_keywords = ["انهاء", "انهي", "خلاص", "انتهى", "خروج", "انهاء المحادثة", "انهاء الجلسة"]
     
     def _contains_keyword(self, text: str, kw: str) -> bool:
         """Match keyword only when not embedded inside other Arabic letters or numbers.
-        This avoids false positives such as matching 'كم' inside 'لديكم'."""
-        pattern = rf'(^|[^\u0600-\u06FF0-9]){re.escape(kw)}($|[^\u0600-\u06FF0-9])'
+        This avoids false positives such as matching 'كم' inside 'لديكم'.
+        Uses lookarounds so punctuation like '؟' is treated as a valid boundary."""
+        # Ensure the keyword is not part of a larger Arabic word or number by asserting
+        # the surrounding chars are not Arabic letters or digits.
+        # Use a tighter Arabic letter range (0621-064A) and include Arabic-Indic digits (0660-0669)
+        pattern = rf'(?<![\u0621-\u064A\u0660-\u06690-9]){re.escape(kw)}(?![\u0621-\u064A\u0660-\u06690-9])'
         return bool(re.search(pattern, text, flags=re.IGNORECASE))
 
     def detect(self, text: str) -> Dict[str, Any]:
@@ -90,12 +96,16 @@ class IntentDetector:
         if any(self._contains_keyword(text_lower, kw) or kw in text_lower for kw in getattr(self, 'buy_keywords', [])):
             return {"intent": "buy", "confidence": 0.92}
 
+        # Check for explicit end-session requests
+        if any(kw in text_lower for kw in getattr(self, 'end_keywords', [])):
+            return {"intent": "end_session", "confidence": 0.98}
+
+        # Check for offers intent (higher precedence than generic search)
+        if any(self._contains_keyword(text_lower, keyword) for keyword in self.offer_keywords):
+            return {"intent": "offers", "confidence": 0.95}
         # Check for search intent
         if any(self._contains_keyword(text_lower, keyword) for keyword in self.search_keywords):
             return {"intent": "search", "confidence": 0.90}        
-        # Check for offers intent
-        if any(self._contains_keyword(text_lower, keyword) for keyword in self.offer_keywords):
-            return {"intent": "offers", "confidence": 0.90}
         
         # Check for help intent
         if any(self._contains_keyword(text_lower, keyword) for keyword in self.help_keywords):
@@ -117,13 +127,20 @@ class ChatbotService:
         self.user_state: Dict[str, Dict[str, Any]] = {}
         # Aliases for categories and brands (map common user words to canonical names)
         # Values can be lists; we try them in order when searching
+        # Map common Arabic user terms to either English categories (as stored in assets)
+        # or to product types (attributes.type) so searches like 'زيوت' or 'شامبو' still work
         self.category_aliases: Dict[str, List[str]] = {
-            'زيوت': ['العناية بالشعر', 'العناية بالبشرة'],
-            'مرطب': ['العناية بالبشرة'],
-            'شامبو': ['العناية بالشعر'],
-            'عطر': ['العطور'],
-            'عطور': ['العطور'],
-            'كريم': ['العناية بالبشرة']
+            'زيوت': ['oil', 'Hair Care'],
+            'زيت': ['oil', 'Hair Care'],
+            'شامبو': ['shampoo', 'Hair Care'],
+            'بلسم': ['conditioner', 'Hair Care'],
+            'كريم': ['العناية بالبشرة', 'Skin Care', 'Body Care'],
+            'مرطب': ['العناية بالبشرة', 'Skin Care'],
+            'لوشن': ['lotion', 'Body Care'],
+            'عطر': ['العطور', 'Fragrances'],
+            'عطور': ['العطور', 'Fragrances'],
+            'مستحضرات': ['Makeup', 'مكياج'],
+            'مكياج': ['Makeup']
         }
         self.brand_aliases: Dict[str, List[str]] = {
             'نيفيا': ['نيڤيا'],
@@ -163,27 +180,111 @@ class ChatbotService:
             aff = ['نعم', 'ايوه', 'أيوه', 'ايه', 'نعمً', 'نعمًا', 'نعم', 'نعم', 'نعم', 'yes', 'y', 'أريد', 'عايز', 'أيوه']
             return any(w == s or s == w for w in aff)
 
-        # If we have a pending buy awaiting customer info, try to parse and complete the order
+        # If we have a pending buy awaiting customer info or confirmation, handle each step
         state = self.user_state.get(user_id, {})
         pending_buy = state.get('pending_buy') if state else None
+
+        # Allow users to provide name+phone directly after viewing product details
+        # even if they didn't say 'نعم' explicitly to start the buy flow.
+        if (not pending_buy) and state and state.get('last_viewed_product'):
+            cust_direct = self._parse_customer_info(normalized)
+            if cust_direct.get('phone'):
+                try:
+                    prod = state.get('last_viewed_product')
+                    pm = prod.get('price_map') or {}
+                    # If product has multiple sizes, require size selection first
+                    if isinstance(pm, dict) and len(pm) > 1:
+                        sizes = list(pm.keys())
+                        choices = [f"{i+1}. {s} - {pm[s]} {prod.get('currency','USD')}" for i, s in enumerate(sizes)]
+                        state['awaiting_size_selection'] = {'product': prod, 'sizes': sizes}
+                        self.user_state[user_id] = state
+                        response_text = "المنتج يحتوي على أحجام متعددة، يرجى اختيار الرقم المقابل للحجم الذي تريد:\n" + "\n".join(choices)
+                        return {
+                            "user_id": user_id,
+                            "original_message": message,
+                            "normalized_message": normalized,
+                            "intent": 'clarify',
+                            "intent_confidence": 0.80,
+                            "response": response_text,
+                            "data": {"sizes": sizes},
+                            "suggestions": [],
+                            "context_summary": {
+                                "turns_count": len(self.memory.get(user_id, [])),
+                                "last_activity": datetime.now().isoformat(),
+                                "user_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "user"]),
+                                "bot_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "bot"]),
+                                "last_intent": 'clarify'
+                            },
+                            "timestamp": datetime.now().isoformat()
+                        }
+
+                    cart = mongo_service.get_or_create_cart_by_customer(cust_direct.get('name') or 'زائر', cust_direct.get('phone'))
+                    # choose price: if product has price_map with single entry, use it; else fallback
+                    chosen_size = None
+                    chosen_price = None
+                    if isinstance(pm, dict) and len(pm) == 1:
+                        chosen_size = list(pm.keys())[0]
+                        chosen_price = float(list(pm.values())[0])
+                    added = mongo_service.add_item_to_cart(cart['cart_id'], prod['product_id'], 1, size=chosen_size, unit_price=chosen_price)
+                    # set pending confirmation for checkout
+                    state['pending_buy'] = {"cart_id": added['cart_id'], "awaiting": "confirm_checkout"}
+                    state['last_cart'] = added
+                    self.user_state[user_id] = state
+
+                    # Save cart ref in memory
+                    self.memory.setdefault(user_id, []).append({
+                        "role": "bot",
+                        "message": f"تم إضافة {prod.get('name') or prod.get('title')} إلى سلة التسوق باسم {cust_direct.get('name')} ورقم {cust_direct.get('phone')}",
+                        "intent": 'buy',
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    response_text = f"تم إضافة {prod.get('name') or prod.get('title')} إلى سلة التسوق باسم {cust_direct.get('name')} ورقم {cust_direct.get('phone')}. المجموع الحالي: {added.get('subtotal','N/A')} {added.get('currency','')}\nهل ترغب بتأكيد الطلب الآن وإتمام الشراء؟ اكتب 'نعم' للتأكيد أو 'لا' للإلغاء."
+                    data = {"cart": added, "ask_confirm": True, "set_cookie": {"name": "cart_id", "value": added['cart_id'], "max_age": 30*24*3600}}
+                    intent = 'buy'
+                    intent_result['confidence'] = 0.95
+                    return {
+                        "user_id": user_id,
+                        "original_message": message,
+                        "normalized_message": normalized,
+                        "intent": intent,
+                        "intent_confidence": intent_result["confidence"],
+                        "response": response_text,
+                        "data": data,
+                        "suggestions": self._get_suggestions(intent),
+                        "context_summary": {
+                            "turns_count": len(self.memory.get(user_id, [])),
+                            "last_activity": datetime.now().isoformat(),
+                            "user_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "user"]),
+                            "bot_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "bot"]),
+                            "last_intent": intent
+                        },
+                        "timestamp": datetime.now().isoformat()
+                    }
+                except Exception as e:
+                    logger.warning(f"Direct buy flow failed: {e}")
+                    pass
+
+        # If we have a pending buy awaiting customer info, try to parse and complete the order
         if pending_buy and pending_buy.get('awaiting') == 'customer_info':
             cust = self._parse_customer_info(normalized)
             if cust.get('phone'):
                 try:
                     cart = mongo_service.get_or_create_cart_by_customer(cust.get('name') or 'زائر', cust.get('phone'))
                     added = mongo_service.add_item_to_cart(cart['cart_id'], pending_buy['product']['product_id'], pending_buy.get('quantity', 1))
-                    # clear pending state
-                    state.pop('pending_buy', None)
+                    # set pending confirmation for checkout
+                    state['pending_buy'] = {"cart_id": added['cart_id'], "awaiting": "confirm_checkout"}
+                    state['last_cart'] = added
                     self.user_state[user_id] = state
+
                     # Save cart ref in memory
-                    self.memory[user_id].append({
+                    self.memory.setdefault(user_id, []).append({
                         "role": "bot",
-                        "message": f"تم إضافة {pending_buy['product']['name']} إلى سلة التسوق باسم {cust.get('name')} ورقم {cust.get('phone')}.",
+                        "message": f"تم إضافة {pending_buy['product']['name']} إلى سلة التسوق باسم {cust.get('name')} ورقم {cust.get('phone')}",
                         "intent": 'buy',
                         "timestamp": datetime.now().isoformat()
                     })
-                    response_text = f"تم إضافة {pending_buy['product']['name']} إلى سلة التسوق باسم {cust.get('name')} ورقم {cust.get('phone')}. المجموع الحالي: {added.get('subtotal','N/A')} {added.get('currency','')}"
-                    data = {"cart": added, "set_cookie": {"name": "cart_id", "value": added['cart_id'], "max_age": 30*24*3600}}
+                    response_text = f"تم إضافة {pending_buy['product']['name']} إلى سلة التسوق باسم {cust.get('name')} ورقم {cust.get('phone')}. المجموع الحالي: {added.get('subtotal','N/A')} {added.get('currency','')}\nهل ترغب بتأكيد الطلب الآن وإتمام الشراء؟ اكتب 'نعم' للتأكيد أو 'لا' للإلغاء."
+                    data = {"cart": added, "ask_confirm": True, "set_cookie": {"name": "cart_id", "value": added['cart_id'], "max_age": 30*24*3600}}
                     intent = 'buy'
                     intent_result['confidence'] = 0.95
                     return {
@@ -209,38 +310,324 @@ class ChatbotService:
                     return ("عذراً، لم أتمكن من إضافة المنتج إلى السلة الآن.", None)
             # else: keep waiting for customer info
 
-        # If the user replies with a pure numeric choice and we have recent search context,
-        # treat it as selecting one of the presented products (e.g., '1', '٢', '3')
-        if re.match(r'^\s*[0-9٠١٢٣٤٥٦٧٨٩]+[\.)]?\s*$', normalized) and self.search_context.get(user_id):
-            # Forward numeric selection to detail handler
-            response_text, data = self._handle_detail_request(user_id, normalized)
-            intent = 'detail'
-            intent_result['confidence'] = 0.95
-            # Store bot response in memory and return
-            self.memory[user_id].append({
-                "role": "bot",
-                "message": response_text,
-                "intent": intent,
-                "timestamp": datetime.now().isoformat()
-            })
-            return {
-                "user_id": user_id,
-                "original_message": message,
-                "normalized_message": normalized,
-                "intent": intent,
-                "intent_confidence": intent_result["confidence"],
-                "response": response_text,
-                "data": data,
-                "suggestions": self._get_suggestions(intent),
-                "context_summary": {
-                    "turns_count": len(self.memory.get(user_id, [])),
-                    "last_activity": datetime.now().isoformat(),
-                    "user_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "user"]),
-                    "bot_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "bot"]),
-                    "last_intent": intent
-                },
-                "timestamp": datetime.now().isoformat()
-            }
+        # --- NEW: allow product selection by number (e.g., '1', '1 تفاصيل', 'رقم 1') ---
+        # If the user sends a message that includes a number and we have a prior search context, interpret it as a selection
+        if user_id in self.search_context and self.search_context.get(user_id):
+            # match either western digits or Arabic-Indic digits, allow optional 'رقم' prefix and extra words after the number
+            sel_match = re.search(r'(?:\b|^)\s*(?:رقم\s*)?([0-9\u0660-\u0669]+)', normalized)
+            if sel_match:
+                sel_raw = sel_match.group(1)
+                # translate Arabic-Indic digits to western
+                trans = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
+                sel_num = int(sel_raw.translate(trans)) if sel_raw else None
+                summaries = self.search_context[user_id].get('summaries') if isinstance(self.search_context[user_id], dict) else self.search_context[user_id]
+                products = self.search_context[user_id].get('products') if isinstance(self.search_context[user_id], dict) else None
+                if sel_num and summaries and 1 <= sel_num <= len(summaries):
+                    idx = sel_num - 1
+                    chosen_summary = summaries[idx]
+                    # Try to find full product object
+                    chosen_prod = None
+                    if products:
+                        try:
+                            chosen_prod = products[idx]
+                        except Exception:
+                            chosen_prod = None
+                    if not chosen_prod:
+                        # Fallback: fetch by product_id
+                        pid = chosen_summary.get('product_id')
+                        chosen_prod = mongo_service.get_product_by_id(pid)
+
+                    if chosen_prod:
+                        # save last viewed product to state for buy flow or direct actions
+                        st = self.user_state.get(user_id, {})
+                        st['last_viewed_product'] = chosen_prod
+                        self.user_state[user_id] = st
+
+                        # Build product detail response
+                        title = chosen_prod.get('title_ar') or chosen_prod.get('title') or chosen_prod.get('name')
+                        desc = chosen_prod.get('description_ar') or chosen_prod.get('description') or ''
+                        price_map = chosen_prod.get('price_map') or {}
+                        if isinstance(price_map, dict) and price_map:
+                            prices = ", ".join([f"{k}: {v}" for k, v in price_map.items()])
+                        else:
+                            prices = str(chosen_prod.get('min_price') or chosen_prod.get('price') or 'N/A')
+                        availability = "متوفر" if chosen_prod.get('in_stock', chosen_prod.get('inStock', False)) else "غير متوفر"
+
+                        # If the user's message expresses an intent to buy (e.g., 'اشتري 1'), start buy flow
+                        wants_to_buy = False
+                        try:
+                            buy_kws = getattr(self.intent_detector, 'buy_keywords', [])
+                            if any(self.intent_detector._contains_keyword(normalized.lower(), kw) for kw in buy_kws) or re.search(r'\bاشتري\b', normalized.lower()):
+                                wants_to_buy = True
+                        except Exception:
+                            wants_to_buy = False
+
+                        if wants_to_buy:
+                            # If product has multiple sizes, prompt for size selection
+                            if isinstance(price_map, dict) and len(price_map) > 1:
+                                sizes = list(price_map.keys())
+                                choices = [f"{i+1}. {s} - {price_map[s]} {chosen_prod.get('currency','') or ''}" for i, s in enumerate(sizes)]
+                                st['awaiting_size_selection'] = {'product': chosen_prod, 'sizes': sizes}
+                                st['pending_buy'] = {'product': {'product_id': chosen_prod.get('product_id'), 'name': title}, 'awaiting': 'size_selection'}
+                                self.user_state[user_id] = st
+                                response_text = "المنتج يحتوي على أحجام متعددة، يرجى اختيار الرقم المقابل للحجم الذي تريد:\n" + "\n".join(choices)
+                                return {
+                                    "user_id": user_id,
+                                    "original_message": message,
+                                    "normalized_message": normalized,
+                                    "intent": 'clarify',
+                                    "intent_confidence": 0.85,
+                                    "response": response_text,
+                                    "data": {"sizes": sizes},
+                                    "suggestions": ["1", "2"],
+                                    "context_summary": {
+                                        "turns_count": len(self.memory.get(user_id, [])),
+                                        "last_activity": datetime.now().isoformat(),
+                                        "recent_questions": self.user_state.get(user_id, {}).get('recent_questions', [])
+                                    },
+                                    "timestamp": datetime.now().isoformat()
+                                }
+                            # Otherwise, set pending_buy and ask for customer info
+                            st['pending_buy'] = {'product': {'product_id': chosen_prod.get('product_id'), 'name': title}, 'awaiting': 'customer_info', 'quantity': 1}
+                            self.user_state[user_id] = st
+                            response_text = f"لقد اخترت '{title}'. لإتمام الشراء، يرجى تزويدي باسمك ورقم هاتفك (مثال: 'ليلى, 0550001111') أو اكتب 'نعم' للتأكيد إذا كنت تريد المتابعة الآن."
+                            return {
+                                "user_id": user_id,
+                                "original_message": message,
+                                "normalized_message": normalized,
+                                "intent": 'buy',
+                                "intent_confidence": 0.95,
+                                "response": response_text,
+                                "data": {"product": chosen_prod},
+                                "suggestions": ["نعم", "لا"],
+                                "context_summary": {
+                                    "turns_count": len(self.memory.get(user_id, [])),
+                                    "last_activity": datetime.now().isoformat(),
+                                    "recent_questions": self.user_state.get(user_id, {}).get('recent_questions', [])
+                                },
+                                "timestamp": datetime.now().isoformat()
+                            }
+
+                        # Default: return detail view
+                        resp = f"تفاصيل المنتج ({sel_num}):\n{title}\nالسعر: {prices} {chosen_prod.get('currency','') or ''}\nالتوفر: {availability}\n\n{desc}\n\nلإضافة هذا المنتج إلى السلة اكتب 'اشتري {sel_num}' أو اكتب 'تفاصيل 1' للحصول على المزيد."
+                        return {
+                            "user_id": user_id,
+                            "original_message": message,
+                            "normalized_message": normalized,
+                            "intent": 'detail',
+                            "intent_confidence": 0.95,
+                            "response": resp,
+                            "data": {"product": chosen_prod},
+                            "suggestions": ["اشتري {}".format(sel_num), "شاهد منتجات مشابهة"],
+                            "context_summary": {
+                                "turns_count": len(self.memory.get(user_id, [])),
+                                "last_activity": datetime.now().isoformat(),
+                                "recent_questions": self.user_state.get(user_id, {}).get('recent_questions', [])
+                            },
+                            "timestamp": datetime.now().isoformat()
+                        }
+                # If number found but out of range, clarify
+                if sel_num:
+                    return ({
+                        "user_id": user_id,
+                        "original_message": message,
+                        "normalized_message": normalized,
+                        "intent": 'clarify',
+                        "intent_confidence": 0.60,
+                        "response": f"لم أجد خيارًا بالرقم {sel_num}. يرجى كتابة رقم من 1 إلى {len(summaries) if summaries else 0}.",
+                        "data": None,
+                        "suggestions": [],
+                        "context_summary": {
+                            "turns_count": len(self.memory.get(user_id, [])),
+                            "last_activity": datetime.now().isoformat(),
+                            "recent_questions": self.user_state.get(user_id, {}).get('recent_questions', [])
+                        },
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+
+        # Confirmation step: user confirms checkout
+        if pending_buy and pending_buy.get('awaiting') == 'confirm_checkout':
+            # Affirmative -> checkout
+            if _is_affirmative(normalized):
+                try:
+                    cart_id = pending_buy.get('cart_id') or (state.get('last_cart') or {}).get('cart_id')
+                    checked = mongo_service.checkout_cart(cart_id)
+                    # clear session and pending state
+                    state.pop('pending_buy', None)
+                    state.pop('last_cart', None)
+                    state.pop('last_viewed_product', None)
+                    self.user_state[user_id] = state
+                    # notify and expire cookie
+                    response_text = "تم تأكيد الطلب. سيتم إنهاء الجلسة الآن. شكراً لطلبك!"
+                    data = {"cart": checked, "set_cookie": {"name": "cart_id", "value": "", "max_age": 0}}
+                    intent = 'buy'
+                    intent_result['confidence'] = 0.98
+                    # optionally clear conversation memory
+                    self.memory[user_id].append({"role": "bot", "message": response_text, "intent": intent, "timestamp": datetime.now().isoformat()})
+                    # clear user's memory entries to end session
+                    self.clear_conversation(user_id)
+                    return {
+                        "user_id": user_id,
+                        "original_message": message,
+                        "normalized_message": normalized,
+                        "intent": intent,
+                        "intent_confidence": intent_result["confidence"],
+                        "response": response_text,
+                        "data": data,
+                        "suggestions": [],
+                        "context_summary": {
+                            "turns_count": 0,
+                            "last_activity": datetime.now().isoformat(),
+                            "user_messages": 0,
+                            "bot_messages": 0,
+                            "last_intent": intent
+                        },
+                        "timestamp": datetime.now().isoformat()
+                    }
+                except Exception as e:
+                    logger.warning(f"Checkout failed: {e}")
+                    return ("عذراً، حدث خطأ أثناء تأكيد الطلب. حاول مرة أخرى لاحقًا.", None)
+
+            # Negative -> cancel pending checkout
+            if normalized.strip() in ['لا', 'الغاء', 'إلغاء', 'الغاء الطلب']:
+                state.pop('pending_buy', None)
+                self.user_state[user_id] = state
+                response_text = "تم إلغاء تأكيد الطلب. ما الذي تود فعله الآن؟"
+                intent = 'buy'
+                intent_result['confidence'] = 0.85
+                self.memory[user_id].append({"role": "bot", "message": response_text, "intent": intent, "timestamp": datetime.now().isoformat()})
+                return {
+                    "user_id": user_id,
+                    "original_message": message,
+                    "normalized_message": normalized,
+                    "intent": intent,
+                    "intent_confidence": intent_result["confidence"],
+                    "response": response_text,
+                    "data": None,
+                    "suggestions": self._get_suggestions(intent),
+                    "context_summary": {
+                        "turns_count": len(self.memory.get(user_id, [])),
+                        "last_activity": datetime.now().isoformat(),
+                        "user_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "user"]),
+                        "bot_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "bot"]),
+                        "last_intent": intent
+                    },
+                    "timestamp": datetime.now().isoformat()
+                }
+            # otherwise keep waiting for explicit confirmation
+
+        # If the user explicitly ends the session, clear shopping cart and end the session
+        if intent == 'end_session':
+            state = self.user_state.get(user_id, {})
+            cart_id = None
+            if state:
+                cart_id = (state.get('last_cart') or {}).get('cart_id') or (state.get('pending_buy') or {}).get('cart_id')
+            try:
+                if cart_id:
+                    mongo_service.delete_cart(cart_id)
+                # clear session state and memory
+                self.clear_conversation(user_id)
+                self.user_state.pop(user_id, None)
+                response_text = "تم إنهاء الجلسة وحذف سلة التسوق الخاصة بك. إذا رغبت في الشراء لاحقًا فأنا هنا للمساعدة. مع السلامة 👋"
+                data = {"set_cookie": {"name": "cart_id", "value": "", "max_age": 0}}
+                intent_result['confidence'] = 0.99
+                intent = 'end_session'
+                # record bot message and return
+                self.memory.setdefault(user_id, []).append({"role": "bot", "message": response_text, "intent": intent, "timestamp": datetime.now().isoformat()})
+                return {
+                    "user_id": user_id,
+                    "original_message": message,
+                    "normalized_message": normalized,
+                    "intent": intent,
+                    "intent_confidence": intent_result["confidence"],
+                    "response": response_text,
+                    "data": data,
+                    "suggestions": [],
+                    "context_summary": {
+                        "turns_count": 0,
+                        "last_activity": datetime.now().isoformat(),
+                        "user_messages": 0,
+                        "bot_messages": 0,
+                        "last_intent": intent
+                    },
+                    "timestamp": datetime.now().isoformat()
+                }
+            except Exception as e:
+                logger.warning(f"End session cleanup failed: {e}")
+                return ("عذراً، حدث خطأ أثناء إنهاء الجلسة. حاول مرة أخرى لاحقًا.", None)
+
+        # If the user replies with a pure numeric choice we may be selecting a product
+        # from recent results, or choosing a size when awaiting size selection.
+        if re.match(r'^\s*[0-9٠١٢٣٤٥٦٧٨٩]+[\.)]?\s*$', normalized):
+            state = self.user_state.get(user_id, {})
+            awaiting = state.get('awaiting_size_selection')
+            # Also support a pending_buy waiting for size (awaiting == 'choose_size')
+            pending_buy = state.get('pending_buy') if state else None
+            if not awaiting and pending_buy and pending_buy.get('awaiting') == 'choose_size':
+                awaiting = {'product': pending_buy.get('product'), 'sizes': pending_buy.get('sizes')}
+
+            if awaiting:
+                # Parse index (support Arabic-Indic digits)
+                s = re.sub(r'[^0-9٠١٢٣٤٥٦٧٨٩]', '', normalized)
+                trans = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
+                s = s.translate(trans)
+                try:
+                    idx = int(s) - 1
+                except Exception:
+                    idx = -1
+                sizes = awaiting.get('sizes') or []
+                if idx < 0 or idx >= len(sizes):
+                    response_text = "الاختيار غير صالح، يرجى إدخال رقم صحيح من القائمة." 
+                    return {"user_id": user_id, "response": response_text, "intent": 'clarify', "intent_confidence": 0.60}
+                size = sizes[idx]
+                prod = awaiting.get('product')
+                unit_price = None
+                try:
+                    unit_price = float((prod.get('price_map') or {}).get(size) or prod.get('min_price') or prod.get('price') or 0)
+                except Exception:
+                    unit_price = prod.get('min_price') or prod.get('price') or 0
+                # set pending buy to request customer info next
+                state.pop('awaiting_size_selection', None)
+                state['pending_buy'] = {'product': prod, 'awaiting': 'customer_info', 'quantity': 1, 'size': size, 'unit_price': unit_price}
+                self.user_state[user_id] = state
+                response_text = f"اخترت الحجم {size} بسعر {unit_price} {prod.get('currency','USD')}، يرجى تزويدي باسمك الكامل ورقم هاتفك (مثال: أحمد, 0501234567)"
+                intent = 'buy'
+                intent_result['confidence'] = 0.95
+                self.memory.setdefault(user_id, []).append({"role": "bot", "message": response_text, "intent": intent, "timestamp": datetime.now().isoformat()})
+                return {"user_id": user_id, "original_message": message, "normalized_message": normalized, "intent": intent, "intent_confidence": intent_result['confidence'], "response": response_text, "data": {"size": size, "unit_price": unit_price}, "suggestions": self._get_suggestions(intent)}
+
+            # Fallback to interpreting as product selection from search results
+            if self.search_context.get(user_id):
+                # Forward numeric selection to detail handler
+                response_text, data = self._handle_detail_request(user_id, normalized)
+                intent = 'detail'
+                intent_result['confidence'] = 0.95
+                # Store bot response in memory and return
+                self.memory[user_id].append({
+                    "role": "bot",
+                    "message": response_text,
+                    "intent": intent,
+                    "timestamp": datetime.now().isoformat()
+                })
+                return {
+                    "user_id": user_id,
+                    "original_message": message,
+                    "normalized_message": normalized,
+                    "intent": intent,
+                    "intent_confidence": intent_result["confidence"],
+                    "response": response_text,
+                    "data": data,
+                    "suggestions": self._get_suggestions(intent),
+                    "context_summary": {
+                        "turns_count": len(self.memory.get(user_id, [])),
+                        "last_activity": datetime.now().isoformat(),
+                        "user_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "user"]),
+                        "bot_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "bot"]),
+                        "last_intent": intent
+                    },
+                    "timestamp": datetime.now().isoformat()
+                }
         # If the user replied with a short affirmative and we have recent search context,
         # interpret as a request for details of the item (single or ask to clarify)
         # Special case: if user says 'نعم' and we have a last viewed product, start buy flow
@@ -249,8 +636,53 @@ class ChatbotService:
             state = self.user_state.get(user_id, {})
             last_viewed = state.get('last_viewed_product') if state else None
             if last_viewed and not state.get('pending_buy'):
-                # start pending buy flow and ask for name/phone
+                pm = last_viewed.get('price_map') or {}
+                # If product has multiple sizes, ask for size first
+                if isinstance(pm, dict) and len(pm) > 1:
+                    sizes = list(pm.keys())
+                    choices = [f"{i+1}. {s} - {pm[s]} {last_viewed.get('currency','USD')}" for i, s in enumerate(sizes)]
+                    state['awaiting_size_selection'] = {'product': last_viewed, 'sizes': sizes}
+                    self.user_state[user_id] = state
+                    response_text = "المنتج يحتوي على أحجام متعددة، يرجى اختيار الرقم المقابل للحجم الذي تريد:\n" + "\n".join(choices)
+                    intent = 'clarify'
+                    intent_result['confidence'] = 0.80
+                    self.memory[user_id].append({
+                        "role": "bot",
+                        "message": response_text,
+                        "intent": intent,
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    data = {"sizes": sizes}
+                    return {
+                        "user_id": user_id,
+                        "original_message": message,
+                        "normalized_message": normalized,
+                        "intent": intent,
+                        "intent_confidence": intent_result["confidence"],
+                        "response": response_text,
+                        "data": data,
+                        "suggestions": [],
+                        "context_summary": {
+                            "turns_count": len(self.memory.get(user_id, [])),
+                            "last_activity": datetime.now().isoformat(),
+                            "user_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "user"]),
+                            "bot_messages": len([m for m in self.memory.get(user_id, []) if m["role"] == "bot"]),
+                            "last_intent": 'clarify'
+                        },
+                        "timestamp": datetime.now().isoformat()
+                    }
+                # If product has a single size or no size map, proceed to ask for customer info
+                size = None
+                unit_price = None
+                if isinstance(pm, dict) and len(pm) == 1:
+                    size = list(pm.keys())[0]
+                    try:
+                        unit_price = float(pm[size])
+                    except Exception:
+                        unit_price = None
                 state['pending_buy'] = {'product': last_viewed, 'awaiting': 'customer_info', 'quantity': 1}
+                if size:
+                    state['pending_buy'].update({'size': size, 'unit_price': unit_price})
                 self.user_state[user_id] = state
                 response_text = "لتأكيد الشراء، يرجى تزويدي باسمك الكامل ورقم هاتفك (مثال: أحمد, 0501234567)"
                 intent = 'buy'
@@ -497,6 +929,15 @@ class ChatbotService:
                     if filters.get('brand') or filters.get('category'):
                         intent = 'search'
                         intent_result['confidence'] = 0.80
+                    else:
+                        # If the user's short text directly matches products in DB, treat as search
+                        try:
+                            quick = mongo_service.search_products(normalized, limit=5)
+                            if quick and len(quick) > 0:
+                                intent = 'search'
+                                intent_result['confidence'] = 0.75
+                        except Exception:
+                            pass
             except Exception:
                 # fallback behavior
                 if 'منتج' in simple or 'منتجات' in simple:
@@ -506,9 +947,18 @@ class ChatbotService:
         # Handle search intent specially to return product results when possible
         if intent == 'search':
             response_text, data = self._handle_search_intent(normalized)
-            # Keep last search summaries so follow-ups like 'تفاصيل ...' can refer to them
+            # Keep last search summaries and product objects so follow-ups like 'تفاصيل ...' can refer to them
             if data and data.get('summaries'):
-                self.search_context[user_id] = data.get('summaries')
+                # store both summaries and the raw products list to support selection by number
+                self.search_context[user_id] = {"summaries": data.get('summaries'), "products": data.get('products')}
+                # Also update recent questions memory (keep up to last 3 user queries)
+                rs = self.user_state.get(user_id, {})
+                recent = rs.get('recent_questions', [])
+                recent.append(normalized)
+                # keep last 3
+                recent = recent[-3:]
+                rs['recent_questions'] = recent
+                self.user_state[user_id] = rs
         else:
             response_text = self._generate_response(intent, normalized)
             data = None
@@ -606,19 +1056,25 @@ class ChatbotService:
         q_norm = self._simplify_text(query or "")
         found_brand = None
         found_category = None
+        found_type = None
         brand_candidates: List[str] = []
         category_candidates: List[str] = []
+        type_candidates: List[str] = []
 
         try:
             brands = [b for b in mongo_service.products.distinct("brand") if b]
             categories = [c for c in mongo_service.products.distinct("category") if c]
+            # Also collect product types (from attributes.type or top-level 'type') to support English type matches
+            types = [t for t in mongo_service.products.distinct("attributes.type") if t] + [t for t in mongo_service.products.distinct('type') if t]
         except Exception:
             brands = []
             categories = []
+            types = []
 
         # Build normalized lookup and prefer longest matches to avoid accidental short matches
         brands_norm = [(b, self._simplify_text(b)) for b in brands]
         categories_norm = [(c, self._simplify_text(c)) for c in categories]
+        types_norm = [(t, self._simplify_text(t)) for t in types]
 
         # Check aliases first (user-friendly replacements)
         for alias, targets in self.category_aliases.items():
@@ -626,8 +1082,14 @@ class ChatbotService:
                 for t in targets:
                     if t in categories:
                         category_candidates.append(t)
-                # even if no exact target in categories, keep alias's targets as suggestions
-                if not category_candidates:
+                    elif t in types or any(self._simplify_text(t) == norm for _, norm in types_norm):
+                        # detected a product 'type' (e.g., oil, shampoo) -> add to type candidates
+                        type_candidates.append(t)
+                    else:
+                        # keep alias target as candidate so it can be shown to user as suggestion
+                        category_candidates.append(t)
+                # even if no exact target in categories/types, keep alias's targets as suggestions
+                if not category_candidates and not type_candidates:
                     category_candidates.extend(targets)
 
         for alias, targets in self.brand_aliases.items():
@@ -666,6 +1128,15 @@ class ChatbotService:
                     found_category = original
                     break
 
+        # Also try to match product types (e.g., 'oil', 'shampoo') against query tokens
+        if not found_type:
+            q_tokens = set(q_norm.split())
+            for original, norm in sorted(types_norm, key=lambda x: -len(x[1])):
+                tokens = [t for t in norm.split() if len(t) > 1]
+                if any(t in q_tokens for t in tokens):
+                    found_type = original
+                    break
+
         # If we have alias-based candidates but no exact found, keep candidates
         if not found_category and category_candidates:
             found_category = category_candidates[0]
@@ -673,11 +1144,16 @@ class ChatbotService:
         if not found_brand and brand_candidates:
             found_brand = brand_candidates[0]
 
+        if not found_type and type_candidates:
+            found_type = type_candidates[0]
+
         return {
             "brand": found_brand,
             "category": found_category,
+            "type": found_type,
             "brand_candidates": brand_candidates,
-            "category_candidates": category_candidates
+            "category_candidates": category_candidates,
+            "type_candidates": type_candidates
         }
 
     def _handle_search_intent(self, query: str):
@@ -687,14 +1163,18 @@ class ChatbotService:
         filters = self._extract_filters_from_query(query)
         brand = filters.get("brand")
         category = filters.get("category")
+        prod_type = filters.get('type')
 
-        # If we have explicit brand/category filters, prefer filtered search (regex matching)
+        # If we have explicit brand/category/type filters, prefer filtered search (regex matching)
         try:
-            if brand or category:
-                products = mongo_service.search_products(query=None, category=category, brand=brand, limit=10)
-                # If filters returned nothing, try a broader text search using the full query
-                if (not products or len(products) == 0) and query:
-                    products = mongo_service.search_products(query=query, category=category, brand=brand, limit=10)
+            if brand or category or prod_type:
+                # Prefer query-based search when a query is present to honor specific product mentions
+                products = None
+                if query:
+                    products = mongo_service.search_products(query=query, category=category, brand=brand, product_type=prod_type, limit=10)
+                # If query-based search returned nothing, fall back to category/brand filters
+                if not products:
+                    products = mongo_service.search_products(query=None, category=category, brand=brand, product_type=prod_type, limit=10)
             else:
                 products = mongo_service.search_products(query=query, limit=10)
         except Exception as e:
@@ -706,32 +1186,54 @@ class ChatbotService:
             summaries = []
             names = []
             for p in products[:10]:
-                name = p.get("name", "(بدون اسم)")
-                price = p.get("price")
+                # Prefer Arabic title when user query looks Arabic
+                if re.search(r'[0-\u06FF]', str(query or '')) and p.get('title_ar'):
+                    name = p.get('title_ar')
+                else:
+                    name = p.get("name") or p.get("title") or "(بدون اسم)"
+                # Determine display price: prefer price_map min, then min_price, then price
                 currency = p.get("currency") or ""
-                in_stock = p.get("in_stock", False)
+                price_val = None
+                pm = p.get('price_map') or {}
+                if isinstance(pm, dict) and pm:
+                    try:
+                        price_val = min([float(v) for v in pm.values()])
+                    except Exception:
+                        price_val = None
+                if price_val is None:
+                    price_val = p.get('min_price') if p.get('min_price') is not None else p.get('price')
+                in_stock = p.get("in_stock", p.get('inStock', False))
                 availability = "متوفر" if in_stock else "غير متوفر"
-                names.append(f"{name} - {price or 'N/A'} {currency} - {availability}")
+                price_str = f"{price_val}" if isinstance(price_val, (int, float)) else (price_val or 'N/A')
+                names.append(f"{name} - {price_str} {currency} - {availability}")
 
                 summaries.append({
-                    "product_id": p.get("product_id"),
+                    "product_id": p.get("product_id") or p.get('_id'),
                     "name": name,
-                    "price": p.get("price"),
+                    "price": price_val,
+                    "name": name,
+                    "price": p.get("min_price") or p.get("price"),
+                    "price_map": p.get('price_map'),
                     "currency": currency,
                     "in_stock": in_stock,
                     "stock_quantity": p.get("stock_quantity", 0),
                     "category": p.get("category"),
                     "brand": p.get("brand"),
-                    "image_url": p.get("image_url")
+                    "image_url": p.get("image_url") or (p.get('images') or [None])[0]
                 })
 
+            # Build a numbered list and instruct the user how to select a product
             header = f"وجدت {len(products)} منتجًا"
             if brand:
                 header += f" من {brand}"
             if category:
                 header += f" في فئة {category}"
-            header += ":\n• " + "\n• ".join(names)
-            header += "\nهل تريد تفاصيل أحد هذه المنتجات؟"
+            header += ":\n"
+            numbered = []
+            for i, n in enumerate(names, start=1):
+                numbered.append(f"{i}. {n}")
+            header += "\n".join(numbered)
+            header += "\n\nللاطلاع على تفاصيل منتج، اكتب رقم المنتج (مثال: '1' أو '1 تفاصيل' أو 'رقم 1'). سأقبل الرقم حتى لو كتبته مع كلمات أخرى."
             data = {"products": products, "summaries": summaries}
             return (header, data)
         else:
@@ -897,16 +1399,25 @@ class ChatbotService:
             names = []
             for p in products[:10]:
                 name = p.get("name", "(بدون اسم)")
-                price = p.get("price")
                 currency = p.get("currency") or ""
+                # Determine display price (use price_map min if present)
+                price_val = None
+                pm = p.get('price_map') or {}
+                if isinstance(pm, dict) and pm:
+                    try:
+                        price_val = min([float(v) for v in pm.values()])
+                    except Exception:
+                        price_val = None
+                if price_val is None:
+                    price_val = p.get('min_price') if p.get('min_price') is not None else p.get('price')
                 in_stock = p.get("in_stock", False)
                 availability = "متوفر" if in_stock else "غير متوفر"
-                names.append(f"{name} - {price or 'N/A'} {currency} - {availability}")
+                names.append(f"{name} - {price_val or 'N/A'} {currency} - {availability}")
 
                 summaries.append({
                     "product_id": p.get("product_id"),
                     "name": name,
-                    "price": p.get("price"),
+                    "price": price_val,
                     "currency": currency,
                     "in_stock": in_stock,
                     "stock_quantity": p.get("stock_quantity", 0),
@@ -952,16 +1463,25 @@ class ChatbotService:
             names = []
             for p in products[:limit]:
                 name = p.get("name", "(بدون اسم)")
-                price = p.get("price")
                 currency = p.get("currency") or ""
+                # Determine display price (use price_map min if present)
+                price_val = None
+                pm = p.get('price_map') or {}
+                if isinstance(pm, dict) and pm:
+                    try:
+                        price_val = min([float(v) for v in pm.values()])
+                    except Exception:
+                        price_val = None
+                if price_val is None:
+                    price_val = p.get('min_price') if p.get('min_price') is not None else p.get('price')
                 in_stock = p.get("in_stock", False)
                 availability = "متوفر" if in_stock else "غير متوفر"
-                names.append(f"{name} - {price or 'N/A'} {currency} - {availability}")
+                names.append(f"{name} - {price_val or 'N/A'} {currency} - {availability}")
 
                 summaries.append({
                     "product_id": p.get("product_id"),
                     "name": name,
-                    "price": p.get("price"),
+                    "price": price_val,
                     "currency": currency,
                     "in_stock": in_stock,
                     "stock_quantity": p.get("stock_quantity", 0),
@@ -1089,6 +1609,9 @@ class ChatbotService:
         if not last:
             return ("ليس لدي نتائج سابقة. هل تريد أن أبحث عن منتج لك؟", None)
 
+        # Support both the old style (list of summaries) and new style (dict with summaries/products)
+        summaries = last.get('summaries') if isinstance(last, dict) else last
+
         # Try to detect an index (1-based) in the user's message
         m = re.search(r'([0-9]+|[٠١٢٣٤٥٦٧٨٩]+)', query)
         selected = None
@@ -1098,23 +1621,23 @@ class ChatbotService:
             trans = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
             try:
                 idx = int(raw.translate(trans)) - 1
-                if 0 <= idx < len(last):
-                    selected = last[idx]
+                if 0 <= idx < len(summaries):
+                    selected = summaries[idx]
             except Exception:
                 selected = None
 
         # If no numeric selection, try to match by name tokens
         if not selected:
             q_norm = self._simplify_text(query)
-            for s in last:
-                name_norm = self._simplify_text(s.get('name', ''))
+            for s in summaries:
+                name_norm = self._simplify_text(s.get('name', '') or s.get('title', ''))
                 if name_norm and (name_norm in q_norm or any(tok in q_norm for tok in name_norm.split() if len(tok) > 1)):
                     selected = s
                     break
 
         if not selected:
             # Could not determine which product; ask user to clarify with numbered choice
-            choices = [f"{i+1}. {s['name']}" for i, s in enumerate(last[:5])]
+            choices = [f"{i+1}. {s.get('name', s.get('title', ''))}" for i, s in enumerate(summaries[:5])]
             prompt = "لم أتمكن من تحديد المنتج. أي واحد تقصد؟\n" + "\n".join(choices)
             return (prompt, None)
 
@@ -1125,28 +1648,46 @@ class ChatbotService:
         if selected.get('product_id'):
             product = mongo_service.get_product_by_id(selected['product_id'])
         if not product:
-            # Fallback by name
-            product = mongo_service.get_product_by_name(selected.get('name', ''))
+            # Fallback by name/title
+            product = mongo_service.get_product_by_name(selected.get('name', '') or selected.get('title', ''))
 
         if not product:
             return ("عذرًا، لم أتمكن من جلب تفاصيل المنتج الآن.", None)
 
-        # Build detail message
-        name = product.get('name')
+        # Build detail message with support for price maps (sizes)
+        name = product.get('name') or product.get('title')
         desc = product.get('description') or ''
-        price = product.get('price')
-        original = product.get('original_price')
+        # price map support
+        price_map = product.get('price_map') or {}
+        min_price = product.get('min_price') if product.get('min_price') is not None else product.get('price')
+        max_price = product.get('max_price') if product.get('max_price') is not None else product.get('price')
+        # If min/max not present but price_map exists, derive from price_map values
+        if (min_price is None or max_price is None) and isinstance(price_map, dict) and price_map:
+            try:
+                vals = [float(v) for v in price_map.values()]
+                if min_price is None:
+                    min_price = min(vals)
+                if max_price is None:
+                    max_price = max(vals)
+            except Exception:
+                pass
         currency = product.get('currency') or ''
-        in_stock = product.get('in_stock', False)
+        in_stock = product.get('in_stock', product.get('inStock', False))
         qty = product.get('stock_quantity', 0)
         availability = 'متوفر' if in_stock else 'غير متوفر'
 
-        details = f"تفاصيل المنتج: {name}\nالسعر: {price or 'N/A'} {currency}"
-        if original:
-            details += f" (السعر الأصلي: {original} {currency})"
+        details = f"تفاصيل المنتج: {name}\nالسعر: {min_price or 'N/A'} {currency}"
+        if max_price and min_price and max_price != min_price:
+            details += f" - يبدأ من {min_price} وحتى {max_price} {currency}"
         details += f"\nالتوفر: {availability} (كمية: {qty})\n"
         if desc:
             details += f"\nالوصف:\n{desc}\n"
+        if price_map:
+            details += "\nأحجام/أسعار متاحة:\n"
+            for size, pr in price_map.items():
+                details += f"- {size}: {pr} {currency}\n"
+        if product.get('images'):
+            details += f"\nصور إضافية متاحة ({len(product.get('images'))})\n"
         if product.get('attributes'):
             details += f"\nالمواصفات:\n"
             for k, v in product.get('attributes', {}).items():

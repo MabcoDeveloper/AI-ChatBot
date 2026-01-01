@@ -1,3 +1,5 @@
+# Curated requirements for publishing ✅
+# Core web and API layers
 fastapi==0.104.1
 uvicorn==0.24.0
 pymongo==4.6.0
@@ -5,10 +7,15 @@ redis==5.0.1
 python-dotenv==1.0.0
 pydantic==2.5.0
 pydantic-settings==2.1.0
-numpy==1.26.0  # Updated version for Python 3.14 compatibility
-sentence-transformers==2.2.2
 pyarabic==0.6.15
 arabic-reshaper==3.0.0
 python-bidi==0.4.2
-requests==2.31.0
 httpx==0.25.0
+
+# Testing
+pytest==7.4.3
+
+# Notes:
+# - Removed unused heavy ML libs (e.g., numpy, sentence-transformers) from the main
+#   requirements to keep the package lightweight for deployment. Add them back if you
+#   rely on embedding models or heavy numeric computation in production.

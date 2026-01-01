@@ -1,0 +1,187 @@
+Project overview (beginner-friendly)
+
+This file explains the purpose of each code file in this project and how they work together.
+The explanations use simple, word-based descriptions suitable for a beginner in Python.
+
+---
+Top-level files
+
+`app.py`      - The web application. It defines HTTP endpoints (for example, /chat) that the UI or clients call.
+                When a message arrives it calls the chatbot service, packages the chatbot reply as JSON, and (if needed)
+                sets a cookie (for the shopping cart). In short: app.py is the bridge between web requests and the bot logic.
+
+`run.py`      - Starts the web server (e.g., using uvicorn). Run this to start the chatbot locally.
+
+`config.py`   - Stores configuration values (database URI, keys, timeouts). The rest of the code reads values from here.
+
+`requirements.txt` - Lists Python libraries the project uses (install with pip).
+
+`test_mongo_atlas.py` - A small test or check script used to verify the MongoDB Atlas connection.
+
+`__pycache__/` - Python's compiled files folder. You can ignore this.
+
+---
+Data & seeding
+
+`data/init_database.py`   - Helper script to create required database structures (indexes, initial collections).
+`data/seed_products.py`   - Adds sample products to the database so the chatbot can return real-looking results.
+
+These are useful when setting up a fresh development database.
+
+---
+Models (small helpers and pure logic)
+
+`models/intent_detector.py`  - Contains rules or helpers to detect user intent (search, price, buy, etc.).
+`models/normalizer.py`       - Tools to clean or normalize Arabic text (fix spelling differences, remove noise).
+`models/memory_manager.py`   - Simple storage helpers for keeping conversation turns or user memory in memory.
+`models/response_builder.py` - Functions that turn internal data (product info, prices) into user-friendly messages.
+
+Note: In this codebase there are similar classes inside `services/chatbot_service.py`; these model files help keep logic organized.
+
+---
+Services (core functionality)
+
+`services/mongo_service.py` - Handles all database work with MongoDB:
+  - Search products (text search, brand/category filters, price range)
+  - Create / fetch carts, add items to carts
+  - Checkout and delete carts
+
+  This module is the data layer. Other parts of the system call it to read and write persistent data.
+
+`services/vector_service.py` - (Optional) If the project supports vector search / embeddings, this file handles those operations.
+
+`services/chatbot_service.py` - The brain of the bot (most important file):
+  - Normalizes messages using the normalizer
+  - Detects intent with rules (search, price, buy, best, end_session)
+  - Maintains per-user transient state (search_context, user_state, memory)
+  - Implements handlers for `search`, `price`, `best`, `detail`, and `buy` flows
+  - Talks to `mongo_service` to search products and manage carts
+  - Returns responses, structured data (e.g., product summaries), and special directives such as `set_cookie` when a cart is created
+
+  In short: `chatbot_service` connects language understanding, business logic, and the database.
+
+`services/__init__.py` - Makes it convenient to import services from other places.
+
+---
+User Interface
+
+`UI/chatbot.html` - A simple web page with a chat box where users type messages.
+`UI/chatbot.js`   - The JavaScript that talks to `app.py`'s `/chat` endpoint, shows messages, and handles cookies returned by the server.
+
+These files provide a minimal chat client so you can test the bot in a browser.
+
+---
+Developer utilities and debug scripts
+
+`dev_tools/debug_scripts/` - A folder of small scripts used while developing and debugging search, price parsing and buy flows.
+Examples are `debug_fix_cheap_expensive.py`, `debug_buy_flow.py`, `run_search_debug.py`.
+
+These scripts are not part of the production flow; they are useful when testing pieces of logic locally.
+
+---
+Tests
+
+`tests/` - Unit tests that verify important behaviors (search, cart flow, tie-breakers, buy flow, checkout).
+Run tests with: `python -m pytest` (from project root). Tests help ensure changes don't break existing behavior.
+
+---
+How the bot works (end-to-end, simple)
+
+1) A user types a message in the web UI (`chatbot.js`). The UI calls the server (`/chat`) in `app.py`.
+2) `app.py` forwards the text to `services/chatbot_service.ChatbotService.process_message(...)`.
+3) `chatbot_service` normalizes the message and detects the intent (is it a search, price question, or a buy request?).
+4) Depending on intent, the `chatbot_service` calls other helpers:
+   - For search/price/best requests → call `mongo_service.search_products` and build a user-friendly summary
+   - For buy requests → parse customer info → call `mongo_service.get_or_create_cart_by_customer` and `add_item_to_cart`
+5) If a cart was created or updated, the bot returns a `set_cookie` directive so the UI can store a `cart_id` cookie.
+6) The UI shows the bot's message to the user. If the user confirms checkout, the bot calls `mongo_service.checkout_cart` and finishes the session.
+
+Key beginner concepts
+
+- Intent: a label that represents what the user wants (e.g., `search`, `buy`). The bot tries to classify each message into an intent.
+- Normalization: cleaning and simplifying text (especially important with Arabic variants) so rules match more reliably.
+- State: The bot keeps short-term state per user (last search results, pending buy) in memory, and long-term data (carts and products) in MongoDB.
+- Cookies: Used to tie a browser session to a persistent cart (the server instructs the client to set cookies when it returns `set_cookie`).
+- Tests: Small scripts under `tests/` assert the expected behavior; they are run with pytest.
+
+Where to start reading the code
+
+1) `services/chatbot_service.py` — highest-level logic and easiest place to understand how messages are processed.
+2) `services/mongo_service.py` — understand how data is searched and modified.
+3) `app.py` and `UI/` — see how the web requests flow to/from the bot.
+4) `tests/` — read tests to see concrete examples of expected behavior.
+
+Expanded examples with code references (beginner-friendly)
+
+services/chatbot_service.py — how messages flow and where to look
+- Main entry: `process_message(self, user_id: str, message: str)`
+  - Normalizes the input
+  - Detects intent (search, price, buy, best, end_session)
+  - Routes to handlers such as `_handle_search_intent`, `_handle_price_intent`, `_handle_buy_intent`, or `_handle_detail_request`
+  - Updates per-user state stored in `self.user_state` and `self.search_context`
+
+Example (simplified):
+- Web UI -> `app.py` posts to `/chat` -> `chatbot_service.process_message(user_id, message)`
+- If intent == 'buy', inside `_handle_buy_intent` it may do:
+
+    cust = self._parse_customer_info(query)
+    if cust['phone']:
+        cart = mongo_service.get_or_create_cart_by_customer(cust['name'] or 'عميل', cust['phone'])
+        updated = mongo_service.add_item_to_cart(cart['cart_id'], product_id, 1)
+        # return response and instruct UI to set cookie with cart id
+        return ("تم إضافة ...", {"cart": updated, "set_cookie": {"name": "cart_id", "value": updated['cart_id'], "max_age": 2592000}})
+
+- Look for these functions in the file: `process_message`, `_handle_buy_intent`, `_handle_search_intent`, `_parse_customer_info`, `_handle_price_intent`, `_handle_detail_request`.
+
+services/mongo_service.py — data-layer examples
+- Important functions:
+  - `search_products(query=None, category=None, brand=None, limit=10, sort_by=None, sort_order=1)`
+  - `get_or_create_cart_by_customer(name, phone)`
+  - `add_item_to_cart(cart_id, product_id, quantity)`
+  - `checkout_cart(cart_id)` and `delete_cart(cart_id)`
+
+Example usage:
+
+    cart = mongo_service.get_or_create_cart_by_customer('أحمد', '0501234567')
+    updated_cart = mongo_service.add_item_to_cart(cart['cart_id'], 'prod_abc123', 1)
+    # After the bot asks for confirmation:
+    mongo_service.checkout_cart(updated_cart['cart_id'])
+
+- These functions abstract MongoDB operations so the `chatbot_service` doesn't need to know query details.
+
+app.py — how the HTTP endpoint connects UI and bot
+- Endpoint: `/chat` accepts a POST with JSON: `{"user_id": "user1", "message": "..."}`
+- Example (simplified flow):
+
+    result = chatbot_service.process_message(user_id, message)
+    if result.get('data') and result['data'].get('set_cookie'):
+        # app.py sets HTTP cookie in the response using the provided instruction
+        set_cookie = result['data']['set_cookie']
+
+    return JSONResponse(result, headers=maybe_cookie_headers)
+
+- The `app.py` layer handles HTTP details (cookies, status codes) and delegates the conversational logic to the chatbot service.
+
+UI/chatbot.js — how the front-end calls the backend and stores the cart cookie
+- Typical flow (very simplified):
+
+    const res = await fetch('/chat', { method: 'POST', body: JSON.stringify({user_id, message}) })
+    const data = await res.json()
+    // Show bot message in chat UI
+    showBotMessage(data.response)
+    // If backend asked to set a cookie, perform it in JS
+    if (data.data && data.data.set_cookie) {
+      const { name, value, max_age } = data.data.set_cookie
+      document.cookie = `${name}=${value}; max-age=${max_age}; path=/;`;
+    }
+
+- The UI reads cookies when needed (for example, to show cart contents) and sends user messages to `/chat`.
+
+Other options
+- I can add a small architecture diagram (ASCII or image) to `docs/` to visually show the components and flow.
+- I can convert this file to a nicely formatted `docs/README.md` (Markdown) and add the code snippets with proper formatting.
+
+Which expansion would you like next: deeper examples for a single file (name which one), a diagram, or converting to Markdown?
+
+---
+End of file.
