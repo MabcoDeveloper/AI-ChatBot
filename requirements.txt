@@ -1,7 +1,6 @@
-# Requirements tested with Python 3.13.4 ✅
 # Core web and API layers
-fastapi==0.104.1
-uvicorn==0.24.0
+fastapi==0.103.2
+uvicorn[standard]==0.24.0
 
 # Database & caching
 pymongo==4.6.0
@@ -9,27 +8,16 @@ redis==5.0.1
 
 # Configuration & settings
 python-dotenv==1.0.0
-pydantic==2.5.0
-pydantic-settings==2.1.0
+pydantic==2.4.2
+pydantic-settings==2.0.3
 
 # Arabic utilities
 pyarabic==0.6.15
 arabic-reshaper==3.0.0
 python-bidi==0.4.2
 
-# HTTP client used by tests / async flows
+# HTTP client
 httpx==0.25.0
 
 # Testing
 pytest==7.4.3
-
-# Compatibility helper for newer Python typing features
-typing_extensions==4.8.0
-
-# Notes:
-# - These versions were selected or tightened to be compatible with CPython 3.13.4.
-# - If you need heavy numeric / ML libraries (e.g., numpy, sentence-transformers),
-#   keep them out of the base requirements and add them to an extras or separate
-#   requirements file (e.g., requirements-ml.txt) so deployments remain lightweight.
-# - After editing, run `python -m pip install -r requirements.txt` in a clean venv
-#   running Python 3.13.4 and run your test suite to validate.

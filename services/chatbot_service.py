@@ -714,7 +714,13 @@ class ChatbotService:
                 }
 
             if self.search_context.get(user_id):
-                last_summaries = self.search_context.get(user_id, [])
+                ctx = self.search_context.get(user_id)
+                # normalize context to a list of summaries when it may be stored as a dict
+                if isinstance(ctx, dict):
+                    last_summaries = ctx.get('summaries') or ctx.get('products') or []
+                else:
+                    last_summaries = ctx or []
+
                 if len(last_summaries) == 1:
                     # User likely wants details for the only returned product
                     response_text, data = self._handle_detail_request(user_id, '1')
@@ -747,7 +753,7 @@ class ChatbotService:
                     }
                 else:
                     # Multiple results - ask user to choose which one
-                    choices = [f"{i+1}. {s['name']}" for i, s in enumerate(last_summaries[:5])]
+                    choices = [f"{i+1}. {s.get('name', s.get('title',''))}" for i, s in enumerate(last_summaries[:5])]
                     prompt = "لقد وجدت عدة منتجات، أي واحد تقصد؟\n" + "\n".join(choices)
                     response_text = prompt
                     data = None
@@ -1552,8 +1558,23 @@ class ChatbotService:
 
         # If no product found, but user has recent search results, use first
         last = self.search_context.get(user_id)
-        if not product and last and len(last) > 0:
-            product = last[0]
+        # Normalize last search/resolution context to a list of summaries or products
+        last_list = []
+        if isinstance(last, dict):
+            last_list = last.get('summaries') or last.get('products') or []
+        else:
+            last_list = last or []
+        if not product and last_list:
+            first = last_list[0]
+            # If first element is a summary with product_id, fetch full product; otherwise assume it's already a product
+            if isinstance(first, dict):
+                pid = first.get('product_id') or first.get('_id')
+                if pid:
+                    product = mongo_service.get_product_by_id(pid)
+                else:
+                    product = first
+            else:
+                product = first
 
         if not product:
             return ("عن أي منتج تريد الشراء؟ الرجاء ذكر اسم المنتج أو اختيار رقم المنتج من القائمة.", None)
