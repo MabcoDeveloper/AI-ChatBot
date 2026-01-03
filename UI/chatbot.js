@@ -718,6 +718,40 @@
         scrollBottom();
     }
 
+    // Render returned categories with sample products
+    function renderCategories(categories) {
+        const row = document.createElement("div");
+        row.className = "msg-row bot";
+
+        const avatar = document.createElement("div");
+        avatar.className = "avatar bot";
+        avatar.textContent = "🤖";
+
+        const bubble = document.createElement("div");
+        bubble.className = "bubble bot";
+
+        let html = '<div class="categories-list" style="text-align:right;direction:rtl">';
+        html += '<strong>الفئات المتوفرة:</strong><br/>';
+        categories.forEach(cat => {
+            html += `<div style="margin-top:8px"><strong>${cat.category}</strong> — ${cat.count} منتج(s)<br/>`;
+            if (Array.isArray(cat.products) && cat.products.length > 0) {
+                html += '<ul style="margin:6px 0 0 0; padding-left:18px; text-align:right;">';
+                cat.products.slice(0,3).forEach(p => {
+                    html += `<li>${p.name} - ${p.price ? p.price + ' USD' : ''} ${p.in_stock ? ' - متوفر' : ' - غير متوفر'}</li>`;
+                });
+                html += '</ul>';
+            }
+            html += '</div>';
+        });
+        html += '</div>';
+
+        bubble.innerHTML = html;
+        row.appendChild(avatar);
+        row.appendChild(bubble);
+        messages.appendChild(row);
+        scrollBottom();
+    }
+
     // Show typing indicator - COMPACT VERSION
     function showTyping() {
         const row = document.createElement("div");
@@ -776,6 +810,10 @@
             
             if (data.response) {
                 addMessage(data.response, "bot");
+                // If backend returned grouped categories, render them visually
+                if (data.data && Array.isArray(data.data.categories) && data.data.categories.length > 0) {
+                    renderCategories(data.data.categories);
+                }
             } else {
                 addMessage("عذراً، لم أتمكن من معالجة طلبك. الرجاء المحاولة مرة أخرى.", "bot");
             }

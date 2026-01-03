@@ -28,15 +28,27 @@ class ArabicNormalizer:
         }
     
     def normalize(self, text: str) -> str:
-        """Normalize Arabic text"""
+        """Normalize Arabic text (lowercase, dialect mappings, collapse accidental repeats)"""
         if not text:
             return ""
-        
-        normalized = text
+
+        normalized = text.strip()
+        # Lowercase for consistent matching
+        normalized = normalized.lower()
+
+        # Replace dialect words using word boundaries to avoid accidental substrings
         for dialect, standard in self.dialect_mappings.items():
-            normalized = normalized.replace(dialect, standard)
-        
-        return normalized.strip()
+            pattern = r'\b' + re.escape(dialect) + r'\b'
+            normalized = re.sub(pattern, standard, normalized, flags=re.IGNORECASE)
+
+        # Collapse accidental repeated Arabic letters (e.g., 'المنتتجات' -> 'المنتجات')
+        normalized = re.sub(r'([\u0621-\u064A])\1+', r'\1', normalized)
+
+        # Remove punctuation and extra whitespace
+        normalized = re.sub(r'[^\u0621-\u064A0-9\s]', ' ', normalized)
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+
+        return normalized
 
 class IntentDetector:
     """Simple intent detector for Arabic with safer keyword matching"""
