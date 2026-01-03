@@ -1,5 +1,5 @@
 (() => {
-    const API_URL = "http://127.0.0.1:8000/chat";
+    const API_URL = "https://ai-chatbot-8c3o.onrender.com/chat";
     const USER_ID = "web_" + Math.random().toString(36).substring(2, 10);
 
     /* ---------------- UI ---------------- */

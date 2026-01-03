@@ -1268,6 +1268,23 @@ class ChatbotService:
                     if a not in brand_suggestions:
                         brand_suggestions.append(a)
 
+                # If the user asked generically about available products (e.g. "ماهي المنتجات المتوفرة")
+                # or provided an empty/very short query, return all categories so the UI can show them in the products table.
+                browse_q = query or ""
+                if ((re.search(r'\b(ما|ماذا|ماهي|ما هي|عرض|اظهر|اعرض)\b', browse_q) and re.search(r'\b(المنتجات|منتجات|الفئات|فئات)\b', browse_q))
+                        or not browse_q.strip()):
+                    cat_counts = []
+                    for c in categories:
+                        try:
+                            cnt = mongo_service.products.count_documents({'category': c})
+                        except Exception:
+                            cnt = 0
+                        cat_counts.append(f"{c} ({cnt})")
+                    if cat_counts:
+                        msg = "هذه هي الفئات المتاحة:\n• " + "\n• ".join(cat_counts) + "\n\nاختر فئة لعرض المنتجات فيها أو اكتب كلمة بحث أخرى."
+                        data = {"categories": categories}
+                        return (msg, data)
+
                 if cat_suggestions or brand_suggestions:
                     msg = "لم أجد منتجات تطابق طلبك تمامًا. هل تقصد واحدة من هذه الفئات أو الماركات؟\n"
                     if cat_suggestions:
