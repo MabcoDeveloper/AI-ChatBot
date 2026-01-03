@@ -1166,6 +1166,61 @@ class ChatbotService:
         """Perform product search using possible filters extracted from the query.
         Returns (response_text, data)
         """
+        # Normalize query for dialect/variants and early-detect generic browse requests
+        q_norm = self.normalizer.normalize(query or "")
+        # If user asked a generic browse question (e.g., 'ماهي المنتجات المتوفرة', 'شو هي المنتجات المتوفرة', 'اعرض الفئات'),
+        # return grouped categories directly before doing a broad search
+        if ((re.search(r'\b(ما|ماذا|ماهي|ما هي|عرض|اظهر|اعرض|شو|شو هي|شو في)\b', q_norm) and re.search(r'\b(المنتجات|منتجات|الفئات|فئات)\b', q_norm))
+                or not q_norm.strip()):
+            categories = [c for c in mongo_service.products.distinct('category') if c]
+            grouped = []
+            for c in categories:
+                try:
+                    cnt = mongo_service.products.count_documents({'category': c})
+                    prods = mongo_service.search_products(query=None, category=c, limit=10)
+                except Exception:
+                    cnt = 0
+                    prods = []
+
+                # Get Arabic label
+                if prods and len(prods) > 0:
+                    cat_label = prods[0].get('category_ar') or prods[0].get('category') or c
+                else:
+                    try:
+                        doc = mongo_service.products.find_one({'category': c}, {'category_ar': 1})
+                        cat_label = doc.get('category_ar') if doc and doc.get('category_ar') else c
+                    except Exception:
+                        cat_label = c
+
+                summaries_cat = []
+                for p in prods:
+                    name = p.get('title_ar') or p.get('name') or p.get('title') or "(بدون اسم)"
+                    price_val = None
+                    pm = p.get('price_map') or {}
+                    if isinstance(pm, dict) and pm:
+                        try:
+                            price_val = min([float(v) for v in pm.values()])
+                        except Exception:
+                            price_val = None
+                    if price_val is None:
+                        price_val = p.get('min_price') if p.get('min_price') is not None else p.get('price')
+                    in_stock = p.get('in_stock', p.get('inStock', False))
+                    image = p.get('image_url') or (p.get('images') or p.get('image') or [None])[0]
+
+                    summaries_cat.append({
+                        "product_id": p.get('product_id') or p.get('_id'),
+                        "name": name,
+                        "price": price_val,
+                        "in_stock": in_stock,
+                        "image_url": image
+                    })
+
+                grouped.append({"category": cat_label, "count": cnt, "products": summaries_cat})
+
+            msg = "هذه هي المنتجات المتوفرة مقسمة حسب الفئات. اكتب اسم فئة لعرض منتجاتها أو اكتب كلمة بحث أخرى."
+            data = {"categories": grouped}
+            return (msg, data)
+
         filters = self._extract_filters_from_query(query)
         brand = filters.get("brand")
         category = filters.get("category")
@@ -1211,7 +1266,7 @@ class ChatbotService:
                 in_stock = p.get("in_stock", p.get('inStock', False))
                 availability = "متوفر" if in_stock else "غير متوفر"
                 price_str = f"{price_val}" if isinstance(price_val, (int, float)) else (price_val or 'N/A')
-                names.append(f"{name} - {price_str} {currency} - {availability}")
+                names.append(f"{p.get('title_ar') or name} - {price_str} {currency} - {availability}")
 
                 summaries.append({
                     "product_id": p.get("product_id") or p.get('_id'),
@@ -1283,16 +1338,12 @@ class ChatbotService:
                             cnt = 0
                             prods = []
 
-                        # Determine Arabic label for the category (prefer product's category_ar when available)
-                        if prods and isinstance(prods, list) and len(prods) > 0:
-                            cat_label = prods[0].get('category_ar') or prods[0].get('category') or c
-                        else:
-                            # try to find a document with this category to fetch category_ar
-                            try:
-                                doc = mongo_service.products.find_one({'category': c}, {'category_ar': 1})
-                                cat_label = doc.get('category_ar') if doc and doc.get('category_ar') else c
-                            except Exception:
-                                cat_label = c
+                        # Determine Arabic label for the category - prefer explicit category_ar from any doc in DB
+                        try:
+                            doc = mongo_service.products.find_one({'category': c}, {'category_ar': 1})
+                            cat_label = doc.get('category_ar') if doc and doc.get('category_ar') else (prods[0].get('category_ar') if prods and len(prods)>0 else c)
+                        except Exception:
+                            cat_label = (prods[0].get('category_ar') if prods and len(prods)>0 else c)
 
                         summaries_cat = []
                         for p in prods:
