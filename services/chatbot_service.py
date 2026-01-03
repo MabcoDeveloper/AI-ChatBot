@@ -1269,20 +1269,61 @@ class ChatbotService:
                         brand_suggestions.append(a)
 
                 # If the user asked generically about available products (e.g. "ماهي المنتجات المتوفرة")
-                # or provided an empty/very short query, return all categories so the UI can show them in the products table.
+                # or provided an empty/very short query, return all categories with sample products grouped by category.
                 browse_q = query or ""
                 if ((re.search(r'\b(ما|ماذا|ماهي|ما هي|عرض|اظهر|اعرض)\b', browse_q) and re.search(r'\b(المنتجات|منتجات|الفئات|فئات)\b', browse_q))
                         or not browse_q.strip()):
-                    cat_counts = []
+                    grouped = []
                     for c in categories:
                         try:
                             cnt = mongo_service.products.count_documents({'category': c})
+                            # fetch a small sample of products for each category
+                            prods = mongo_service.search_products(query=None, category=c, limit=10)
                         except Exception:
                             cnt = 0
-                        cat_counts.append(f"{c} ({cnt})")
-                    if cat_counts:
-                        msg = "هذه هي الفئات المتاحة:\n• " + "\n• ".join(cat_counts) + "\n\nاختر فئة لعرض المنتجات فيها أو اكتب كلمة بحث أخرى."
-                        data = {"categories": categories}
+                            prods = []
+
+                        # Determine Arabic label for the category (prefer product's category_ar when available)
+                        if prods and isinstance(prods, list) and len(prods) > 0:
+                            cat_label = prods[0].get('category_ar') or prods[0].get('category') or c
+                        else:
+                            # try to find a document with this category to fetch category_ar
+                            try:
+                                doc = mongo_service.products.find_one({'category': c}, {'category_ar': 1})
+                                cat_label = doc.get('category_ar') if doc and doc.get('category_ar') else c
+                            except Exception:
+                                cat_label = c
+
+                        summaries_cat = []
+                        for p in prods:
+                            # Prefer Arabic title when available
+                            name = p.get('title_ar') or p.get('name') or p.get('title') or "(بدون اسم)"
+                            # Determine display price: prefer price_map min, then min_price, then price
+                            price_val = None
+                            pm = p.get('price_map') or {}
+                            if isinstance(pm, dict) and pm:
+                                try:
+                                    price_val = min([float(v) for v in pm.values()])
+                                except Exception:
+                                    price_val = None
+                            if price_val is None:
+                                price_val = p.get('min_price') if p.get('min_price') is not None else p.get('price')
+                            in_stock = p.get('in_stock', p.get('inStock', False))
+                            image = p.get('image_url') or (p.get('images') or p.get('image') or [None])[0]
+
+                            summaries_cat.append({
+                                "product_id": p.get('product_id') or p.get('_id'),
+                                "name": name,
+                                "price": price_val,
+                                "in_stock": in_stock,
+                                "image_url": image
+                            })
+
+                        grouped.append({"category": cat_label, "count": cnt, "products": summaries_cat})
+
+                    if grouped:
+                        msg = "هذه هي المنتجات المتوفرة مقسمة حسب الفئات. اكتب اسم فئة لعرض منتجاتها أو اكتب كلمة بحث أخرى."
+                        data = {"categories": grouped}
                         return (msg, data)
 
                 if cat_suggestions or brand_suggestions:
