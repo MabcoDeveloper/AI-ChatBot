@@ -21,7 +21,7 @@ try:
     print(f"📊 Available databases: {databases}")
     
     # Use beauty_bot database
-    db = client['beauty_bot']
+    db = client['test']
     
     # Create or get collections
     products = db['products']
