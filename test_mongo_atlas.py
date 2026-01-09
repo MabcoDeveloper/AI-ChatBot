@@ -4,7 +4,7 @@ from datetime import datetime
 import sys
 
 # Your Atlas connection string
-MONGO_URI = "mongodb+srv://yaseen:test123@cluster0.p99gzup.mongodb.net/?retryWrites=true&w=majority"
+MONGO_URI = "mongodb+srv://gradpro11223344:userone@cluster0.lomqiss.mongodb.net/?appName=Cluster0"
 
 try:
     print("Testing MongoDB Atlas connection...")
