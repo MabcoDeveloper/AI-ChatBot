@@ -574,10 +574,12 @@ class ChatbotService:
         if re.match(r'^\s*[0-9٠١٢٣٤٥٦٧٨٩]+[\.)]?\s*$', normalized):
             state = self.user_state.get(user_id, {})
             awaiting = state.get('awaiting_size_selection')
-            # Also support a pending_buy waiting for size (awaiting == 'choose_size')
+            # Also support a pending_buy waiting for size (awaiting == 'choose_size' or 'size_selection')
             pending_buy = state.get('pending_buy') if state else None
-            if not awaiting and pending_buy and pending_buy.get('awaiting') == 'choose_size':
-                awaiting = {'product': pending_buy.get('product'), 'sizes': pending_buy.get('sizes')}
+            if not awaiting and pending_buy and pending_buy.get('awaiting') in ('choose_size', 'size_selection'):
+                prod_from_pending = pending_buy.get('product') or {}
+                sizes_from_pending = pending_buy.get('sizes') or (list((prod_from_pending.get('price_map') or {}).keys()) if isinstance(prod_from_pending.get('price_map'), dict) else [])
+                awaiting = {'product': prod_from_pending, 'sizes': sizes_from_pending}
 
             if awaiting:
                 # Parse index (support Arabic-Indic digits)
