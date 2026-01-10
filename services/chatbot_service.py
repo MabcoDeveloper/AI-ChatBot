@@ -350,9 +350,55 @@ class ChatbotService:
                         chosen_prod = mongo_service.get_product_by_id(pid)
 
                     if chosen_prod:
+                        # If there's an existing awaiting size selection, treat this numeric selection as a SIZE CHOICE
+                        st = self.user_state.get(user_id, {})
+                        awaiting = st.get('awaiting_size_selection') if st else None
+                        pending_buy = st.get('pending_buy') if st else None
+                        if not awaiting and pending_buy and pending_buy.get('awaiting') == 'size_selection':
+                            awaiting = {'product': pending_buy.get('product'), 'sizes': pending_buy.get('sizes')}
+                        if awaiting:
+                            # Interpret the number as a size selection for a pending product
+                            sizes = awaiting.get('sizes') or []
+                            idx_size = sel_num - 1
+                            if idx_size < 0 or idx_size >= len(sizes):
+                                return ({
+                                    "user_id": user_id,
+                                    "original_message": message,
+                                    "normalized_message": normalized,
+                                    "intent": 'clarify',
+                                    "intent_confidence": 0.60,
+                                    "response": f"الاختيار غير صالح للحجم {sel_num}. يرجى كتابة رقم من 1 إلى {len(sizes)}.",
+                                    "data": None,
+                                    "suggestions": [],
+                                    "context_summary": {
+                                        "turns_count": len(self.memory.get(user_id, [])),
+                                        "last_activity": datetime.now().isoformat(),
+                                        "recent_questions": self.user_state.get(user_id, {}).get('recent_questions', [])
+                                    },
+                                    "timestamp": datetime.now().isoformat()
+                                })
+                            size = sizes[idx_size]
+                            prod = awaiting.get('product')
+                            unit_price = None
+                            try:
+                                unit_price = float((prod.get('price_map') or {}).get(size) or prod.get('min_price') or prod.get('price') or 0)
+                            except Exception:
+                                unit_price = prod.get('min_price') or prod.get('price') or 0
+                            # set pending buy to request customer info next
+                            st.pop('awaiting_size_selection', None)
+                            st['pending_buy'] = {'product': prod, 'awaiting': 'customer_info', 'quantity': 1, 'size': size, 'unit_price': unit_price}
+                            st['selected_product_id'] = prod.get('product_id')
+                            self.user_state[user_id] = st
+                            response_text = f"اخترت الحجم {size} بسعر {unit_price} {prod.get('currency','USD')}، يرجى تزويدي باسمك الكامل ورقم هاتفك (مثال: أحمد, 0501234567)"
+                            intent = 'buy'
+                            intent_result['confidence'] = 0.95
+                            self.memory.setdefault(user_id, []).append({"role": "bot", "message": response_text, "intent": intent, "timestamp": datetime.now().isoformat()})
+                            return {"user_id": user_id, "original_message": message, "normalized_message": normalized, "intent": intent, "intent_confidence": intent_result['confidence'], "response": response_text, "data": {"size": size, "unit_price": unit_price}, "suggestions": self._get_suggestions(intent)}
+
                         # save last viewed product to state for buy flow or direct actions
                         st = self.user_state.get(user_id, {})
                         st['last_viewed_product'] = chosen_prod
+                        st['selected_product_id'] = chosen_prod.get('product_id')
                         self.user_state[user_id] = st
 
                         # Build product detail response
@@ -381,6 +427,7 @@ class ChatbotService:
                                 choices = [f"{i+1}. {s} - {price_map[s]} {chosen_prod.get('currency','') or ''}" for i, s in enumerate(sizes)]
                                 st['awaiting_size_selection'] = {'product': chosen_prod, 'sizes': sizes}
                                 st['pending_buy'] = {'product': {'product_id': chosen_prod.get('product_id'), 'name': title}, 'awaiting': 'size_selection'}
+                                st['selected_product_id'] = chosen_prod.get('product_id')
                                 self.user_state[user_id] = st
                                 response_text = "المنتج يحتوي على أحجام متعددة، يرجى اختيار الرقم المقابل للحجم الذي تريد:\n" + "\n".join(choices)
                                 return {
@@ -401,6 +448,7 @@ class ChatbotService:
                                 }
                             # Otherwise, set pending_buy and ask for customer info
                             st['pending_buy'] = {'product': {'product_id': chosen_prod.get('product_id'), 'name': title}, 'awaiting': 'customer_info', 'quantity': 1}
+                            st['selected_product_id'] = chosen_prod.get('product_id')
                             self.user_state[user_id] = st
                             response_text = f"لقد اخترت '{title}'. لإتمام الشراء، يرجى تزويدي باسمك ورقم هاتفك (مثال: 'ليلى, 0550001111') أو اكتب 'نعم' للتأكيد إذا كنت تريد المتابعة الآن."
                             return {
@@ -469,6 +517,7 @@ class ChatbotService:
                     state.pop('pending_buy', None)
                     state.pop('last_cart', None)
                     state.pop('last_viewed_product', None)
+                    state.pop('selected_product_id', None)
                     self.user_state[user_id] = state
                     # notify and expire cookie
                     response_text = "تم تأكيد الطلب. سيتم إنهاء الجلسة الآن. شكراً لطلبك!"
@@ -504,6 +553,7 @@ class ChatbotService:
             # Negative -> cancel pending checkout
             if normalized.strip() in ['لا', 'الغاء', 'إلغاء', 'الغاء الطلب']:
                 state.pop('pending_buy', None)
+                state.pop('selected_product_id', None)
                 self.user_state[user_id] = state
                 response_text = "تم إلغاء تأكيد الطلب. ما الذي تود فعله الآن؟"
                 intent = 'buy'
@@ -574,9 +624,9 @@ class ChatbotService:
         if re.match(r'^\s*[0-9٠١٢٣٤٥٦٧٨٩]+[\.)]?\s*$', normalized):
             state = self.user_state.get(user_id, {})
             awaiting = state.get('awaiting_size_selection')
-            # Also support a pending_buy waiting for size (awaiting == 'choose_size')
+            # Also support a pending_buy waiting for size (awaiting == 'size_selection')
             pending_buy = state.get('pending_buy') if state else None
-            if not awaiting and pending_buy and pending_buy.get('awaiting') == 'choose_size':
+            if not awaiting and pending_buy and pending_buy.get('awaiting') == 'size_selection':
                 awaiting = {'product': pending_buy.get('product'), 'sizes': pending_buy.get('sizes')}
 
             if awaiting:
@@ -695,6 +745,7 @@ class ChatbotService:
                 state['pending_buy'] = {'product': last_viewed, 'awaiting': 'customer_info', 'quantity': 1}
                 if size:
                     state['pending_buy'].update({'size': size, 'unit_price': unit_price})
+                state['selected_product_id'] = (last_viewed or {}).get('product_id')
                 self.user_state[user_id] = state
                 response_text = "لتأكيد الشراء، يرجى تزويدي باسمك الكامل ورقم هاتفك (مثال: أحمد, 0501234567)"
                 intent = 'buy'
@@ -1718,6 +1769,7 @@ class ChatbotService:
         # Otherwise, ask for customer info and set pending state
         state = self.user_state.get(user_id, {})
         state['pending_buy'] = {'product': product, 'awaiting': 'customer_info', 'quantity': 1}
+        state['selected_product_id'] = product.get('product_id')
         self.user_state[user_id] = state
         prompt = "لتأكيد الشراء، يرجى تزويدي باسمك الكامل ورقم هاتفك (مثال: أحمد, 0501234567)"
         return (prompt, None)
@@ -1838,6 +1890,7 @@ class ChatbotService:
         # Save last viewed product for this user so a following 'نعم' will start the buy flow
         state = self.user_state.get(user_id, {})
         state['last_viewed_product'] = product
+        state['selected_product_id'] = product.get('product_id')
         self.user_state[user_id] = state
 
         # Append buy prompt and include product in returned data

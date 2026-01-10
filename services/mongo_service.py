@@ -149,8 +149,8 @@ class MongoDBService:
     
     def __init__(self, mongo_uri: str = None):
         # Your Atlas connection string
-        self.mongo_uri = mongo_uri or "mongodb+srv://yaseen:test123@cluster0.p99gzup.mongodb.net/?retryWrites=true&w=majority"
-        self.db_name = "beauty_bot"
+        self.mongo_uri = mongo_uri or "mongodb+srv://gradpro11223344:userone@cluster0.lomqiss.mongodb.net/?appName=Cluster0"
+        self.db_name = "test"
         
         try:
             logger.info("Connecting to MongoDB Atlas...")
