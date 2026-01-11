@@ -6,6 +6,7 @@ import logging
 import sys
 import re
 import difflib
+from bson import ObjectId
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -804,19 +805,38 @@ class MongoDBService:
         return products
     
     def get_product_by_name(self, product_name: str) -> Optional[Dict]:
-        """Get product by name or title (fuzzy match)"""
-        product = self.products.find_one(
-            {"$or": [{"name": {"$regex": product_name, "$options": "i"}}, {"title": {"$regex": product_name, "$options": "i"}}]},
-            {"_id": 0}
-        )
-        return product
+        """Get product by name or title (fuzzy match).
+
+        Searches both English and Arabic title fields and description fields to improve
+        matching for multilingual content.
+        """
+        if not product_name or not str(product_name).strip():
+            return None
+        try:
+            esc = re.escape(str(product_name))
+            q = {
+                "$or": [
+                    {"name": {"$regex": esc, "$options": "i"}},
+                    {"title": {"$regex": esc, "$options": "i"}},
+                    {"title_ar": {"$regex": esc, "$options": "i"}},
+                    {"description": {"$regex": esc, "$options": "i"}},
+                    {"description_ar": {"$regex": esc, "$options": "i"}}
+                ]
+            }
+            product = self.products.find_one(q)
+            return product
+        except Exception:
+            # Fallback to simple find_one with the raw product_name
+            return self.products.find_one({"$or": [{"name": product_name}, {"title": product_name}]})
     
     def get_product_by_id(self, product_id: str) -> Optional[Dict]:
-        """Get product by product_id or _id"""
-        product = self.products.find_one(
-            {"$or": [{"product_id": product_id}, {"_id": product_id}]},
-            {"_id": 0}
-        )
+        """Get product by product_id or _id (accepts string ObjectId)"""
+        q_or = [{"product_id": product_id}]
+        try:
+            q_or.append({"_id": ObjectId(product_id)})
+        except Exception:
+            q_or.append({"_id": product_id})
+        product = self.products.find_one({"$or": q_or})
         return product
     
     def get_current_offers(self, limit: int = 10) -> List[Dict]:
