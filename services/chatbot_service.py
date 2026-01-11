@@ -2438,13 +2438,44 @@ class ChatbotService:
                 return ("عذراً، لم أتمكن من إتمام عملية الشراء الآن.", None)
 
         # Otherwise, ask for customer info and set pending state
-        state = _get_state(user_id)
-        state['pending_buy'] = {'product': product, 'awaiting': 'customer_info', 'quantity': 1}
-        state['selected_product_id'] = product.get('product_id')
-        _set_state(user_id, state)
+        try:
+            st = conv_memory.get_user_state(user_id) or {}
+            st['pending_buy'] = {'product': product, 'awaiting': 'customer_info', 'quantity': 1}
+            st['selected_product_id'] = product.get('product_id')
+            try:
+                conv_memory.set_user_state(user_id, st)
+            except Exception:
+                self.user_state[user_id] = st
+        except Exception:
+            # fallback to in-memory state
+            st = self.user_state.get(user_id, {})
+            st['pending_buy'] = {'product': product, 'awaiting': 'customer_info', 'quantity': 1}
+            st['selected_product_id'] = product.get('product_id')
+            self.user_state[user_id] = st
+
         prompt = "لتأكيد الشراء، يرجى تزويدي باسمك الكامل ورقم هاتفك (مثال: أحمد, 0501234567)"
         try:
-            _log_bot_turn(user_id, prompt, 'buy', {'product_id': product.get('product_id')})
+            # Log bot turn into training session if possible
+            sid = st.get('training_session_id') if st else None
+            if not sid:
+                sid = str(uuid.uuid4())
+                st = st or {}
+                st['training_session_id'] = sid
+                try:
+                    conv_memory.set_user_state(user_id, st)
+                except Exception:
+                    self.user_state[user_id] = st
+            turn = {
+                'role': 'bot',
+                'message': prompt,
+                'intent': 'buy',
+                'timestamp': datetime.utcnow(),
+                'metadata': {'product_id': product.get('product_id')}
+            }
+            try:
+                mongo_service.log_training_turn(sid, turn)
+            except Exception:
+                pass
         except Exception:
             pass
         return (prompt, None)
