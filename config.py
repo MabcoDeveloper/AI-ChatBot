@@ -8,8 +8,8 @@ load_dotenv()
 
 class Settings(BaseSettings):
     # MongoDB Atlas
-    MONGO_URI: str = os.getenv("MONGO_URI", "mongodb+srv://yaseen:test123@cluster0.p99gzup.mongodb.net/?retryWrites=true&w=majority")
-    MONGO_DB: str = os.getenv("MONGO_DB", "beauty_bot")
+    MONGO_URI: str = os.getenv("MONGO_URI", "mongodb+srv://gradpro11223344:userone@cluster0.lomqiss.mongodb.net/?appName=Cluster0")
+    MONGO_DB: str = os.getenv("MONGO_DB", "test")
     MONGO_PRODUCTS_COLLECTION: str = "products"
     MONGO_OFFERS_COLLECTION: str = "offers"
     
