@@ -45,6 +45,15 @@ print('After size selection state:', memory_manager.get_user_state(user))
 r_confirm = svc.process_message(user, 'نعم')  # confirm
 print('Confirm data payload:', r_confirm.get('data'))
 assert r_confirm.get('data', {}).get('product_title') is not None, 'product_title should be present for product with no explicit product_id'
+# backward-compat alias: 'size' should be present and match selected size
+assert r_confirm.get('data', {}).get('size') == '50ml', f"expected size '50ml', got {r_confirm.get('data', {}).get('size')!r}"
+# product_id should be filled (never None) and be a string (normalized)
+pid = r_confirm.get('data', {}).get('product_id')
+assert pid is not None, 'product_id should be present and normalized even if the doc had no explicit product_id'
+assert isinstance(pid, str), f'product_id should be a string after normalization, got {type(pid)}'
+# responses should be JSON serializable (sanitizer applied)
+import json
+json.dumps(r_confirm)
 
 # cleanup
 mongo_service.products.delete_one({'_id': res_ins.inserted_id})

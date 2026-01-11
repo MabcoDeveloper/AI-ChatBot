@@ -204,6 +204,13 @@ async def chat(request: ChatRequest, response: Response, background_tasks: Backg
         except Exception as e:
             logger.warning(f"Failed to normalize chat result: {e}")
 
+        # Sanitize result to ensure JSON-serializable types (avoid ObjectId/datetime issues)
+        try:
+            # Chatbot service provides a sanitizer helper
+            result = chatbot_service._sanitize_for_response(result)
+        except Exception as e:
+            logger.warning(f"Failed to sanitize chat result: {e}")
+
         # Calculate processing time
         processing_time_ms = (time.time() - start_time) * 1000
         result["processing_time_ms"] = round(processing_time_ms, 2)

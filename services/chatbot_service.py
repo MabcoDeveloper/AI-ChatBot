@@ -501,11 +501,12 @@ class ChatbotService:
 
                 response_text = "تم بدء طلب إضافة المنتج إلى سلة التسوق بنجاح."
                 product_title = ( prod.get('title') or prod.get('name')) if prod else None
-                data = {"action": "start_add_to_cart", "product_title": product_title, "selected_size": chosen_size, "purchase_intent": True, "status": "started", "ask_confirm": False}
+                pid = self._normalize_pid(prod) if prod else None
+                data = {"action": "start_add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": chosen_size, "size": chosen_size, "purchase_intent": True, "status": "started", "ask_confirm": False}
                 intent = 'buy'
                 self.memory.setdefault(user_id, []).append({"role": "bot", "message": response_text, "intent": intent, "timestamp": datetime.now().isoformat()})
                 try:
-                    self._log_bot_turn(user_id, response_text, 'buy', {'product_title': product_title, 'selected_size': chosen_size})
+                    self._log_bot_turn(user_id, response_text, 'buy', {'product_title': product_title, 'product_id': pid, 'selected_size': chosen_size})
                 except Exception:
                     pass
                 return self._format_response(user_id, message, normalized, intent, 0.95, response_text, data=data, suggestions=[])
@@ -768,11 +769,14 @@ class ChatbotService:
                 try:
                     response_text = "تم بدء إضافة المنتج إلى سلة التسوق بنجاح. هل ترغب بتأكيد الطلب الآن وإتمام الشراء؟ اكتب 'نعم' للتأكيد أو 'لا' للإلغاء."
                     product = pending_buy.get('product') if pending_buy else None
-                    product_title = (product.get('title_ar') or product.get('title') or product.get('name')) if product else None
+                    product_title = ( product.get('title') or product.get('name')) if product else None
+                    pid = self._normalize_pid(product) if product else None
                     data = {
                         "action": "start_add_to_cart",
                         "product_title": product_title,
+                        "product_id": pid,
                         "selected_size": pending_buy.get('size'),
+                        "size": pending_buy.get('size'),
                         "purchase_intent": True,
                         "status": "started",
                         "ask_confirm": True
@@ -834,7 +838,8 @@ class ChatbotService:
 
                     response_text = f"تم بدء إضافة {prod.get('title') or prod.get('name')} إلى سلة التسوق بنجاح. هل ترغب بتأكيد الطلب الآن وإتمام الشراء؟ اكتب 'نعم' للتأكيد أو 'لا' للإلغاء."
                     product_title = (prod.get('title_ar') or prod.get('title') or prod.get('name')) if prod else None
-                    data = {"action": "start_add_to_cart", "product_title": product_title, "selected_size": chosen_size, "purchase_intent": True, "status": "started", "ask_confirm": True}
+                    pid = self._normalize_pid(prod) if prod else None
+                    data = {"action": "start_add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": chosen_size, "size": chosen_size, "purchase_intent": True, "status": "started", "ask_confirm": True}
                     intent = 'buy'
                     intent_result['confidence'] = 0.95
                     return {
@@ -960,7 +965,8 @@ class ChatbotService:
                     except Exception:
                         pass
                     product_title = (prod.get('title_ar') or prod.get('title') or prod.get('name')) if prod else None
-                    data = {"action": "start_add_to_cart", "product_title": product_title, "selected_size": size, "purchase_intent": True, "status": "started", "ask_confirm": True}
+                    pid = self._normalize_pid(prod) if prod else None
+                    data = {"action": "start_add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": size, "size": size, "purchase_intent": True, "status": "started", "ask_confirm": True}
                     return {"user_id": user_id, "original_message": message, "normalized_message": normalized, "intent": intent, "intent_confidence": intent_result['confidence'], "response": response_text, "data": data, "suggestions": self._get_suggestions(intent)}
 
                 if sel_num and summaries and 1 <= sel_num <= len(summaries):
@@ -1054,7 +1060,7 @@ class ChatbotService:
                                 pass
                             pid = self._normalize_pid(prod.get('product_id') or prod.get('_id'))
                             product_title = (prod.get('title_ar') or prod.get('title') or prod.get('name')) if prod else None
-                            data = {"action": "start_add_to_cart", "product_title": product_title, "selected_size": size, "purchase_intent": True, "status": "started", "ask_confirm": True}
+                            data = {"action": "start_add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": size, "size": size, "purchase_intent": True, "status": "started", "ask_confirm": True}
                             return {"user_id": user_id, "original_message": message, "normalized_message": normalized, "intent": intent, "intent_confidence": intent_result['confidence'], "response": response_text, "data": data, "suggestions": self._get_suggestions(intent)}
 
                         # save last viewed product to state for buy flow or direct actions
@@ -1175,7 +1181,9 @@ class ChatbotService:
                             _set_state(user_id, st)
                             response_text = f"لقد اخترت '{title}'. هل ترغب بتأكيد الطلب الآن وإتمام الشراء؟ اكتب 'نعم' للتأكيد أو 'لا' للإلغاء."
                             product_title = title
-                            data = {"action": "start_add_to_cart", "product_title": product_title, "selected_size": None, "purchase_intent": True, "status": "started", "ask_confirm": True}
+                            pid = chosen_prod.get('product_id') or chosen_prod.get('_id')
+                            pid = self._normalize_pid(pid)
+                            data = {"action": "start_add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": None, "size": None, "purchase_intent": True, "status": "started", "ask_confirm": True}
                             return self._format_response(user_id, message, normalized, 'buy', 0.95, response_text, data=data, suggestions=["نعم", "لا"], context_summary={"turns_count": len(self.memory.get(user_id, [])), "last_activity": datetime.now().isoformat(), "recent_questions": _get_state(user_id).get('recent_questions', [])})
 
                         # Default: return detail view
@@ -1280,12 +1288,13 @@ class ChatbotService:
 
                     response_text = "تم بدء طلب إضافة المنتج إلى سلة التسوق بنجاح."
                     product_title = (prod.get('title_ar') or prod.get('title') or prod.get('name')) if prod else None
-                    data = {"action": "start_add_to_cart", "product_title": product_title, "selected_size": chosen_size, "purchase_intent": True, "status": "started", "ask_confirm": False}
+                    pid = state.get('selected_product_id') or (self._normalize_pid(prod) if prod else None)
+                    data = {"action": "start_add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": chosen_size, "size": chosen_size, "purchase_intent": True, "status": "started", "ask_confirm": False}
                     intent = 'buy'
                     intent_result['confidence'] = 0.95
                     self.memory.setdefault(user_id, []).append({"role": "bot", "message": response_text, "intent": intent, "timestamp": datetime.now().isoformat()})
                     try:
-                        self._log_bot_turn(user_id, response_text, 'buy', {'product_title': product_title, 'selected_size': chosen_size})
+                        self._log_bot_turn(user_id, response_text, 'buy', {'product_title': product_title, 'product_id': pid, 'selected_size': chosen_size})
                     except Exception:
                         pass
                     return self._format_response(user_id, message, normalized, intent, intent_result["confidence"], response_text, data=data, suggestions=[])
@@ -2851,7 +2860,7 @@ class ChatbotService:
                 conv_memory.set_user_state(user_id, st)
                 response = f"سُجلت رغبتك بشراء المنتج. هل ترغب بتأكيد الطلب الآن وإتمام الشراء؟ اكتب 'نعم' للتأكيد أو 'لا' للإلغاء."
                 product_title = (product.get('title_ar') or product.get('title') or product.get('name')) if product else None
-                data = {"action": "start_add_to_cart", "product_title": product_title, "selected_size": None, "purchase_intent": True, "status": "started", "ask_confirm": True}
+                data = {"action": "add_to_cart", "product_title": product_title, "selected_size": None, "purchase_intent": True, "status": "started", "ask_confirm": True}
                 return (response, data)
             except Exception as e:
                 logger.warning(f"Buy flow failed: {e}")
@@ -2873,14 +2882,17 @@ class ChatbotService:
         # Inform user that add-to-cart was started and ask them to confirm (no name/phone required)
         prompt = "تم بدء إضافة المنتج إلى سلة التسوق بنجاح. هل ترغب بتأكيد الطلب الآن وإتمام الشراء؟ اكتب 'نعم' للتأكيد أو 'لا' للإلغاء."
         try:
-            product_title = (product.get('title_ar') or product.get('title') or product.get('name')) if product else None
-            self._log_bot_turn(user_id, prompt, 'buy', {'product_title': product_title})
+            product_title = ( product.get('title') or product.get('name')) if product else None
+            pid = self._normalize_pid(product) if product else None
+            self._log_bot_turn(user_id, prompt, 'buy', {'product_title': product_title, 'product_id': pid})
         except Exception:
             pass
         data = {
             "action": "start_add_to_cart",
             "product_title": product_title,
+            "product_id": pid,
             "selected_size": chosen_size,
+            "size": chosen_size,
             "purchase_intent": True,
             "status": "started",
             "ask_confirm": True
@@ -2981,12 +2993,11 @@ class ChatbotService:
                 q = {'$or': []}
                 if product.get('product_id'):
                     q['$or'].append({'product_id': product.get('product_id')})
-                title_ar = product.get('title_ar') or ''
+               
                 title = product.get('title') or ''
                 name = product.get('name') or ''
                 desc = product.get('description') or product.get('description_ar') or ''
-                if title_ar:
-                    q['$or'].append({'title_ar': {'$regex': re.escape(title_ar), '$options': 'i'}})
+                
                 if title:
                     q['$or'].append({'title': {'$regex': re.escape(title), '$options': 'i'}})
                 if name:
@@ -3001,7 +3012,7 @@ class ChatbotService:
                     if not orig:
                         # Try permissive tokenized lookup by simplified title tokens
                         try:
-                            title_tok = self._simplify_text(product.get('title_ar') or product.get('title') or '')
+                            title_tok = self._simplify_text( product.get('title') or '')
                             for tok in [t for t in title_tok.split() if len(t) > 3]:
                                 logger.info("Trying permissive lookup token=%s", tok)
                                 maybe = mongo_service.products.find_one({'$or': [{'title_ar': {'$regex': tok, '$options': 'i'}}, {'title': {'$regex': tok, '$options': 'i'}}]})
@@ -3021,7 +3032,7 @@ class ChatbotService:
                 logger.debug("Augmentation lookup failed: %s", e)
 
         # Build detail message with support for price maps (sizes)
-        name = product.get('title_ar') or product.get('title') or product.get('name')
+        name =  product.get('title') or product.get('name')
         desc = product.get('description_ar') or product.get('description') or ''
         # Normalize price info so prices stored under 'price' or 'price_map' are handled consistently
         pinfo = self._get_price_info(product)
