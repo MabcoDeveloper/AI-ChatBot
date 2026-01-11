@@ -647,7 +647,7 @@ class ChatbotService:
 
                     response_text = f"تم بدء إضافة {prod.get('title') or prod.get('name')} إلى سلة التسوق بنجاح. هل ترغب بتأكيد الطلب الآن وإتمام الشراء؟ اكتب 'نعم' للتأكيد أو 'لا' للإلغاء."
                     data = {
-                        "action": "start_add_to_cart",
+                        "action": "add_to_cart",
                         "product_id": pid,
                         "selected_size": chosen_size,
                         "purchase_intent": True,
@@ -738,7 +738,7 @@ class ChatbotService:
                     })
                     response_text = f"سجّلت رغبتك بشراء المنتج. هل ترغب بتأكيد الطلب الآن وإتمام الشراء؟ اكتب 'نعم' للتأكيد أو 'لا' للإلغاء."
                     product_title = (prod.get('title_ar') or prod.get('title') or prod.get('name')) if prod else None
-                    data = {"action": "start_add_to_cart", "product_title": product_title, "selected_size": chosen_size, "purchase_intent": True, "status": "started", "ask_confirm": True}
+                    data = {"action": "add_to_cart", "product_title": product_title, "selected_size": chosen_size, "purchase_intent": True, "status": "started", "ask_confirm": True}
                     intent = 'buy'
                     intent_result['confidence'] = 0.95
                     return {
@@ -772,7 +772,7 @@ class ChatbotService:
                     product_title = ( product.get('title') or product.get('name')) if product else None
                     pid = self._normalize_pid(product) if product else None
                     data = {
-                        "action": "start_add_to_cart",
+                        "action": "add_to_cart",
                         "product_title": product_title,
                         "product_id": pid,
                         "selected_size": pending_buy.get('size'),
@@ -839,7 +839,7 @@ class ChatbotService:
                     response_text = f"تم بدء إضافة {prod.get('title') or prod.get('name')} إلى سلة التسوق بنجاح. هل ترغب بتأكيد الطلب الآن وإتمام الشراء؟ اكتب 'نعم' للتأكيد أو 'لا' للإلغاء."
                     product_title = (prod.get('title_ar') or prod.get('title') or prod.get('name')) if prod else None
                     pid = self._normalize_pid(prod) if prod else None
-                    data = {"action": "start_add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": chosen_size, "size": chosen_size, "purchase_intent": True, "status": "started", "ask_confirm": True}
+                    data = {"action": "add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": chosen_size, "size": chosen_size, "purchase_intent": True, "status": "started", "ask_confirm": True}
                     intent = 'buy'
                     intent_result['confidence'] = 0.95
                     return {
@@ -966,7 +966,7 @@ class ChatbotService:
                         pass
                     product_title = (prod.get('title_ar') or prod.get('title') or prod.get('name')) if prod else None
                     pid = self._normalize_pid(prod) if prod else None
-                    data = {"action": "start_add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": size, "size": size, "purchase_intent": True, "status": "started", "ask_confirm": True}
+                    data = {"action": "add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": size, "size": size, "purchase_intent": True, "status": "started", "ask_confirm": True}
                     return {"user_id": user_id, "original_message": message, "normalized_message": normalized, "intent": intent, "intent_confidence": intent_result['confidence'], "response": response_text, "data": data, "suggestions": self._get_suggestions(intent)}
 
                 if sel_num and summaries and 1 <= sel_num <= len(summaries):
@@ -1060,7 +1060,7 @@ class ChatbotService:
                                 pass
                             pid = self._normalize_pid(prod.get('product_id') or prod.get('_id'))
                             product_title = (prod.get('title_ar') or prod.get('title') or prod.get('name')) if prod else None
-                            data = {"action": "start_add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": size, "size": size, "purchase_intent": True, "status": "started", "ask_confirm": True}
+                            data = {"action": "add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": size, "size": size, "purchase_intent": True, "status": "started", "ask_confirm": True}
                             return {"user_id": user_id, "original_message": message, "normalized_message": normalized, "intent": intent, "intent_confidence": intent_result['confidence'], "response": response_text, "data": data, "suggestions": self._get_suggestions(intent)}
 
                         # save last viewed product to state for buy flow or direct actions
@@ -1183,7 +1183,7 @@ class ChatbotService:
                             product_title = title
                             pid = chosen_prod.get('product_id') or chosen_prod.get('_id')
                             pid = self._normalize_pid(pid)
-                            data = {"action": "start_add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": None, "size": None, "purchase_intent": True, "status": "started", "ask_confirm": True}
+                            data = {"action": "add_to_cart", "product_title": product_title, "product_id": pid, "selected_size": None, "size": None, "purchase_intent": True, "status": "started", "ask_confirm": True}
                             return self._format_response(user_id, message, normalized, 'buy', 0.95, response_text, data=data, suggestions=["نعم", "لا"], context_summary={"turns_count": len(self.memory.get(user_id, [])), "last_activity": datetime.now().isoformat(), "recent_questions": _get_state(user_id).get('recent_questions', [])})
 
                         # Default: return detail view
@@ -2888,7 +2888,7 @@ class ChatbotService:
         except Exception:
             pass
         data = {
-            "action": "start_add_to_cart",
+            "action": "add_to_cart",
             "product_title": product_title,
             "product_id": pid,
             "selected_size": chosen_size,
