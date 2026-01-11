@@ -384,6 +384,9 @@ class MongoDBService:
 
                 # For Arabic queries, only use Arabic tokens and match against Arabic fields in DB
                 tokens = [_simplify_ar(_normalize_token(t)) for t in tokens_raw if t.strip()]
+                # Filter out common stopwords and very short tokens that cause noisy matches
+                stopwords = {'من','في','على','عن','مع','اعاني','أعاني','اعانى','انا','مشكلة','عندي','لدي','هل','يا','ارجو','ممكن'}
+                tokens = [t for t in tokens if t and len(t) > 2 and t not in stopwords]
                 if tokens:
                     try:
                         token_regex = '|'.join([re.escape(tok) for tok in set(tokens) if tok])
@@ -440,7 +443,7 @@ class MongoDBService:
 
                             # Domain-specific heuristics map
                             symptom_map = {
-                                'متقصف': {'tokens': ['متقصف'], 'cats': ['العناية بالشعر', 'شعر']},
+                                'متقصف': {'tokens': ['متقصف', 'تقصف', 'تقصف الشعر'], 'cats': ['العناية بالشعر', 'شعر']},
                                 'جاف': {'tokens': ['جاف', 'جافة'], 'cats': ['العناية بالبشرة', 'بشرة']},
                                 'تساقط': {'tokens': ['تساقط', 'تساقط الشعر'], 'cats': ['العناية بالشعر', 'شعر']},
                                 'حبوب': {'tokens': ['حبوب', 'حب الشباب'], 'cats': ['العناية بالبشرة', 'بشرة']},
@@ -525,16 +528,47 @@ class MongoDBService:
                 ]
             })
 
-        # Price range filters - use min_price/max_price fields which cover both single-price and multi-size products
+        # Price range filters - if provided, we'll prefer to apply them client-side when DB min/max fields
+        # are not reliably present (covers products storing prices in price_map/price dicts). We still keep
+        # the DB-level filter when min_price/max_price fields exist to allow index use, but avoid rejecting
+        # products that only store prices under 'price' or 'price_map'. We'll set a flag to indicate a range
+        # filter is requested and apply post-filtering if necessary.
+        price_filter_requested = False
         if min_price is not None or max_price is not None:
-            # For overlapping ranges, require product.max_price >= min_price and product.min_price <= max_price
-            if min_price is not None and max_price is not None:
-                filter_query["max_price"] = {"$gte": float(min_price)}
-                filter_query["min_price"] = {"$lte": float(max_price)}
-            elif min_price is not None:
-                filter_query["max_price"] = {"$gte": float(min_price)}
-            elif max_price is not None:
-                filter_query["min_price"] = {"$lte": float(max_price)}
+            price_filter_requested = True
+            # Try to add DB filters if useful (this helps if documents have min_price/max_price indexed)
+            try:
+                if min_price is not None and max_price is not None:
+                    # Prefer DB range match when documents have min_price/max_price, but allow docs that lack
+                    # those fields to pass through (we'll do client-side filtering later). Use an $and with $or
+                    # so we don't inadvertently exclude documents missing min/max fields.
+                    filter_query.setdefault('$and', [])
+                    filter_query['$and'].append({
+                        '$or': [
+                            {"max_price": {"$gte": float(min_price)}, "min_price": {"$lte": float(max_price)}},
+                            {"min_price": {"$exists": False}},
+                            {"max_price": {"$exists": False}}
+                        ]
+                    })
+                elif min_price is not None:
+                    filter_query.setdefault('$and', [])
+                    filter_query['$and'].append({
+                        '$or': [
+                            {"max_price": {"$gte": float(min_price)}},
+                            {"max_price": {"$exists": False}}
+                        ]
+                    })
+                elif max_price is not None:
+                    filter_query.setdefault('$and', [])
+                    filter_query['$and'].append({
+                        '$or': [
+                            {"min_price": {"$lte": float(max_price)}},
+                            {"min_price": {"$exists": False}}
+                        ]
+                    })
+            except Exception:
+                # If conversion fails, don't add DB filters; we'll filter in Python later
+                pass
         
         # Execute query (some MongoDB server versions disallow $text inside $or with non-text clauses)
         try:
@@ -630,6 +664,95 @@ class MongoDBService:
                     raise
             except Exception:
                 raise e
+
+        # If a price range was requested, perform client-side filtering to support products storing per-size prices
+        if price_filter_requested:
+            try:
+                # Start with the already fetched products; to improve hit-rate, fetch a larger candidate set if needed
+                candidates = products
+                if len(candidates) < limit:
+                    more_cursor = self.products.find(filter_query, {
+                        "_id": 0,
+                        "product_id": 1,
+                        "name": 1,
+                        "title": 1,
+                        "title_ar": 1,
+                        "description": 1,
+                        "price": 1,
+                        "min_price": 1,
+                        "max_price": 1,
+                        "price_map": 1,
+                        "original_price": 1,
+                        "currency": 1,
+                        "category": 1,
+                        "brand": 1,
+                        "in_stock": 1,
+                        "stock_quantity": 1,
+                        "attributes": 1,
+                        "images": 1,
+                        "image_url": 1,
+                        "rating": 1,
+                        "review_count": 1
+                    }).limit(max(200, limit*5))
+                    try:
+                        candidates = list(more_cursor)
+                    except Exception:
+                        pass
+
+                def _prod_min_price(prod):
+                    # Determine the minimum numeric price for a product from available fields
+                    mp = prod.get('min_price')
+                    if mp is not None:
+                        try:
+                            return float(mp)
+                        except Exception:
+                            pass
+                    pm_raw = prod.get('price_map') or prod.get('price') or prod.get('pricing') or {}
+                    vals = []
+                    if isinstance(pm_raw, dict):
+                        for v in pm_raw.values():
+                            if isinstance(v, dict):
+                                vv = v.get('price') or v.get('value') or v.get('amount')
+                            else:
+                                vv = v
+                            try:
+                                vals.append(float(vv))
+                            except Exception:
+                                continue
+                    elif isinstance(pm_raw, list):
+                        for itm in pm_raw:
+                            if isinstance(itm, dict):
+                                vv = itm.get('price') or itm.get('value') or itm.get('amount')
+                                try:
+                                    vals.append(float(vv))
+                                except Exception:
+                                    continue
+                    if vals:
+                        return min(vals)
+                    # fallback to single numeric price
+                    p = prod.get('price')
+                    try:
+                        return float(p)
+                    except Exception:
+                        return None
+
+                filtered = []
+                for p in candidates:
+                    pmin = _prod_min_price(p)
+                    if pmin is None:
+                        continue
+                    ok = True
+                    if min_price is not None and pmin < float(min_price):
+                        ok = False
+                    if max_price is not None and pmin > float(max_price):
+                        ok = False
+                    if ok:
+                        filtered.append((pmin, p))
+
+                filtered.sort(key=lambda x: x[0])
+                products = [p for _, p in filtered][:limit]
+            except Exception as e:
+                logger.warning(f"Client-side price filtering failed: {e}")
 
         # Fallback fuzzy matching when text search yields no results (improves spelling tolerance)
         if (not products or len(products) == 0) and query and query.strip():

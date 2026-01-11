@@ -777,29 +777,6 @@
         if (typing) typing.remove();
     }
 
-    // Small toast helper for brief UI notifications
-    function showToast(text) {
-        const t = document.createElement('div');
-        t.className = 'chat-toast';
-        t.textContent = text;
-        Object.assign(t.style, {
-            position: 'fixed',
-            bottom: '100px',
-            right: '30px',
-            background: '#667eea',
-            color: 'white',
-            padding: '10px 14px',
-            borderRadius: '8px',
-            boxShadow: '0 6px 16px rgba(0,0,0,0.12)',
-            zIndex: 10000,
-            fontSize: '14px',
-            transition: 'opacity 0.4s ease'
-        });
-        document.body.appendChild(t);
-        setTimeout(() => { t.style.opacity = '0'; }, 2800);
-        setTimeout(() => { t.remove(); }, 3200);
-    }
-
     // Send message to API
     async function sendMessage() {
         const text = input.value.trim();
@@ -836,17 +813,6 @@
                 // If backend returned grouped categories, render them visually
                 if (data.data && Array.isArray(data.data.categories) && data.data.categories.length > 0) {
                     renderCategories(data.data.categories);
-                }
-
-                // If the backend indicates an add-to-cart process started, store cart/product info and notify the user
-                if (data.data && data.data.action === 'start_add_to_cart') {
-                    const cartId = (data.data.cart && data.data.cart.cart_id) || (data.data.set_cookie && data.data.set_cookie.value);
-                    const productId = data.data.product_id;
-                    const selectedSize = data.data.selected_size;
-                    // expose for UI flows or later steps
-                    window.currentCartId = cartId;
-                    window.lastPendingPurchase = { productId, selectedSize };
-                    showToast("بدأت عملية الإضافة إلى السلة — سيتم تأكيدها لاحقاً.");
                 }
             } else {
                 addMessage("عذراً، لم أتمكن من معالجة طلبك. الرجاء المحاولة مرة أخرى.", "bot");
