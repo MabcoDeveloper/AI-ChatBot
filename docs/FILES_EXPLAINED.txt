@@ -119,6 +119,7 @@ services/chatbot_service.py — how messages flow and where to look
   - Detects intent (search, price, buy, best, end_session)
   - Routes to handlers such as `_handle_search_intent`, `_handle_price_intent`, `_handle_buy_intent`, or `_handle_detail_request`
   - Updates per-user state stored in `self.user_state` and `self.search_context`
+  - New: `training_examples` collection in MongoDB stores conversation sessions and turns for later training of the intent classifier (see `scripts/train_intent.py`).
 
 Example (simplified):
 - Web UI -> `app.py` posts to `/chat` -> `chatbot_service.process_message(user_id, message)`

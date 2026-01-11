@@ -169,13 +169,47 @@ async def chat(request: ChatRequest, response: Response, background_tasks: Backg
                 response.set_cookie(key=cookie_name, value=cookie_value, max_age=max_age, httponly=True)
         except Exception as e:
             logger.debug(f"Failed to set cookie from chatbot result: {e}")
-        
+
+        # Ensure returned result satisfies response_model (fill missing fields with sensible defaults)
+        try:
+            # Required top-level fields
+            result.setdefault('user_id', request.user_id)
+            result.setdefault('original_message', request.message)
+            result.setdefault('normalized_message', result.get('normalized_message') or request.message)
+            result.setdefault('intent', result.get('intent', 'unknown'))
+            result.setdefault('intent_confidence', float(result.get('intent_confidence') or 0.0))
+            result.setdefault('response', result.get('response', ''))
+
+            # Optional but required by response model as non-null
+            if not isinstance(result.get('data', None), dict):
+                # Allow data to be None, but ensure key exists
+                result['data'] = result.get('data') if result.get('data') is not None else None
+
+            result.setdefault('suggestions', result.get('suggestions') or [])
+
+            # Context summary: provide a minimal but useful default
+            if not isinstance(result.get('context_summary'), dict):
+                mem = getattr(chatbot_service, 'memory', {})
+                turns = mem.get(request.user_id, []) if isinstance(mem, dict) else []
+                result['context_summary'] = {
+                    'turns_count': len(turns),
+                    'last_activity': datetime.now().isoformat(),
+                    'user_messages': len([m for m in turns if m.get('role') == 'user']),
+                    'bot_messages': len([m for m in turns if m.get('role') == 'bot']),
+                    'last_intent': result.get('intent')
+                }
+
+            # Timestamp
+            result.setdefault('timestamp', datetime.now().isoformat())
+        except Exception as e:
+            logger.warning(f"Failed to normalize chat result: {e}")
+
         # Calculate processing time
         processing_time_ms = (time.time() - start_time) * 1000
         result["processing_time_ms"] = round(processing_time_ms, 2)
-        
-        logger.info(f"Chat response generated: intent={result['intent']}, time={processing_time_ms:.2f}ms")
-        
+
+        logger.info(f"Chat response generated: intent={result.get('intent')}, time={processing_time_ms:.2f}ms")
+
         return result
         
     except Exception as e:
@@ -298,15 +332,19 @@ async def test_endpoint():
     }
 
 # Error handler
+from fastapi.responses import JSONResponse
+
+
 @app.exception_handler(Exception)
 async def universal_exception_handler(request, exc):
-    """Handle all exceptions"""
+    """Handle all exceptions and return a JSONResponse with status 500"""
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return {
+    content = {
         "error": "Internal Server Error",
         "message": "An unexpected error occurred. Please try again.",
         "timestamp": datetime.now().isoformat()
     }
+    return JSONResponse(status_code=500, content=content)
 
 if __name__ == "__main__":
     print("\n" + "="*50)

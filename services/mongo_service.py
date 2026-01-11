@@ -175,6 +175,8 @@ class MongoDBService:
             self.offers: Collection = self.db['offers']
             # Carts collection to store customer shopping carts
             self.carts: Collection = self.db['carts']
+            # Collection to store conversation logs / training examples
+            self.training_examples: Collection = self.db['training_examples']
             
             # Create indexes
             self._create_indexes()
@@ -261,11 +263,64 @@ class MongoDBService:
                     self.carts.create_index([("customer.phone", ASCENDING)], name="customer_phone_idx")
             except Exception as e:
                 logger.debug(f"Could not create carts indexes: {e}")
-            
+
+
             logger.info("✅ MongoDB indexes created/verified")
             
         except Exception as e:
             logger.warning(f"⚠️ Could not create indexes: {e}")
+    
+
+    # ------------------- Training data helpers -------------------
+    def insert_training_session(self, session_doc: Dict[str, Any]) -> Optional[str]:
+        """Create a new training session document and return its id (or session_id field)."""
+        try:
+            if self.training_examples is None:
+                return None
+            res = self.training_examples.insert_one(session_doc)
+            try:
+                return str(res.inserted_id)
+            except Exception:
+                return session_doc.get('session_id')
+        except Exception as e:
+            logger.warning(f"Failed to insert training session: {e}")
+            return None
+
+    def log_training_turn(self, session_id: str, turn: Dict[str, Any]) -> bool:
+        """Append a turn to an existing training session (by session_id)."""
+        try:
+            if self.training_examples is None:
+                return False
+            q = {'session_id': session_id}
+            update = {'$push': {'turns': turn}, '$set': {'last_updated': datetime.utcnow()}}
+            res = self.training_examples.update_one(q, {'$push': {'turns': turn}, '$set': {'last_updated': datetime.utcnow()}}, upsert=True)
+            return res.modified_count >= 0
+        except Exception as e:
+            logger.warning(f"Failed to log training turn: {e}")
+            return False
+
+    def finalize_training_session(self, session_id: str, outcome: str, summary: Dict[str, Any] = None) -> bool:
+        """Mark a training session as finished with an outcome label and optional summary."""
+        try:
+            if self.training_examples is None:
+                return False
+            update_doc = {'outcome': outcome, 'ended_at': datetime.utcnow()}
+            if summary:
+                update_doc['summary'] = summary
+            res = self.training_examples.update_one({'session_id': session_id}, {'$set': update_doc})
+            return res.modified_count >= 0
+        except Exception as e:
+            logger.warning(f"Failed to finalize training session: {e}")
+            return False
+
+    def fetch_training_sessions(self, filter_query: Dict[str, Any] = None, limit: int = 100):
+        try:
+            q = filter_query or {}
+            cursor = self.training_examples.find(q)
+            return list(cursor)[:limit]
+        except Exception as e:
+            logger.warning(f"Failed to fetch training sessions: {e}")
+            return []
     
     def search_products(self, query: str = None, category: str = None, 
                        brand: str = None, product_type: str = None, limit: int = 20, min_price: float = None, max_price: float = None,
@@ -837,17 +892,44 @@ class MongoDBService:
             try:
                 price_val = float(unit_price)
             except Exception:
-                price_val = None
+                price_val = unit_price  # fall back to original for later coercion
         if price_val is None and size and isinstance(product.get('price_map'), dict):
             try:
                 pm = product.get('price_map')
                 # price_map keys might be strings like '50ml'
                 if size in pm:
-                    price_val = float(pm[size])
+                    price_val = pm[size]
             except Exception:
                 price_val = None
         if price_val is None:
             price_val = product.get('min_price') or product.get('price') or 0
+
+        # Coerce price_val into a numeric float when possible
+        try:
+            if isinstance(price_val, dict):
+                # try common keys
+                for k in ('price', 'amount', 'value'):
+                    if k in price_val:
+                        try:
+                            price_val = float(price_val[k])
+                            break
+                        except Exception:
+                            continue
+                else:
+                    # try first numeric-like inner value
+                    found = False
+                    for v in price_val.values():
+                        try:
+                            price_val = float(v)
+                            found = True
+                            break
+                        except Exception:
+                            continue
+                    if not found:
+                        price_val = 0.0
+            price_val = float(price_val)
+        except Exception:
+            price_val = 0.0
 
         item = {
             "product_id": product.get('product_id'),
@@ -860,8 +942,20 @@ class MongoDBService:
         }
         self.carts.update_one({"cart_id": cart_id}, {"$push": {"items": item}, "$set": {"updated_at": datetime.now()}})
         cart = self.get_cart_by_id(cart_id)
-        # compute subtotal
-        subtotal = sum([(it.get('price') or 0) * (it.get('quantity') or 1) for it in cart.get('items', [])])
+        # compute subtotal safely
+        subtotal = 0.0
+        for it in cart.get('items', []):
+            p = it.get('price') or 0
+            try:
+                pnum = float(p)
+            except Exception:
+                pnum = 0.0
+            q = it.get('quantity') or 1
+            try:
+                qnum = int(q)
+            except Exception:
+                qnum = 1
+            subtotal += pnum * qnum
         cart['subtotal'] = subtotal
         return cart
 

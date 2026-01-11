@@ -209,5 +209,51 @@ class ConversationMemory:
                 return False
         return False
 
+    # ---------------- User state helpers ----------------
+    def _state_key(self, user_id: str) -> str:
+        return self._get_key(user_id, key_type='state')
+
+    def set_user_state(self, user_id: str, state: Dict[str, Any]):
+        """Persist arbitrary per-user state as a dict"""
+        key = self._state_key(user_id)
+        data = self._serialize(state)
+        if self.redis_client:
+            try:
+                self.redis_client.set(key, data, ex=self.ttl)
+                return True
+            except redis.RedisError as e:
+                print(f"Redis error when setting user state: {e}")
+                # Fallback to in-memory
+        # In-memory fallback
+        if not hasattr(self, '_state_store'):
+            self._state_store = {}
+        self._state_store[key] = state
+        return True
+
+    def get_user_state(self, user_id: str) -> Dict[str, Any]:
+        key = self._state_key(user_id)
+        if self.redis_client:
+            try:
+                raw = self.redis_client.get(key)
+                if raw is None:
+                    return {}
+                return self._deserialize(raw) or {}
+            except redis.RedisError as e:
+                print(f"Redis error when getting user state: {e}")
+        if hasattr(self, '_state_store') and key in self._state_store:
+            return self._state_store[key]
+        return {}
+
+    def clear_user_state(self, user_id: str):
+        key = self._state_key(user_id)
+        if self.redis_client:
+            try:
+                self.redis_client.delete(key)
+            except redis.RedisError:
+                pass
+        if hasattr(self, '_state_store') and key in self._state_store:
+            del self._state_store[key]
+        return True
+
 # Create singleton instance
 memory_manager = ConversationMemory()
