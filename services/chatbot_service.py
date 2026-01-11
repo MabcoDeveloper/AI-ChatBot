@@ -1898,12 +1898,53 @@ class ChatbotService:
             "context_summary": context_summary,
             "timestamp": datetime.now().isoformat()
         }
+        # Sanitize response (convert ObjectId, datetimes, bytes, etc. to JSON-serializable forms)
+        sanitized = self._sanitize_for_response(resp)
         try:
-            logger.info("Bot response: %s", json.dumps(resp, ensure_ascii=False))
+            logger.info("Bot response: %s", json.dumps(sanitized, ensure_ascii=False))
         except Exception:
-            logger.debug("Bot response (raw): %s", resp)
-        return resp
+            logger.debug("Bot response (raw sanitized): %s", sanitized)
+        return sanitized
     
+    def _sanitize_for_response(self, obj):
+        """Recursively convert types that are not JSON-serializable (ObjectId, datetime, bytes) into serializable forms."""
+        try:
+            from bson.objectid import ObjectId
+        except Exception:
+            ObjectId = None
+        # dict
+        if isinstance(obj, dict):
+            return {k: self._sanitize_for_response(v) for k, v in obj.items()}
+        # list/tuple
+        if isinstance(obj, list):
+            return [self._sanitize_for_response(v) for v in obj]
+        if isinstance(obj, tuple):
+            return tuple(self._sanitize_for_response(v) for v in obj)
+        # ObjectId
+        try:
+            if ObjectId and isinstance(obj, ObjectId):
+                return str(obj)
+        except Exception:
+            pass
+        # datetime
+        if isinstance(obj, datetime):
+            try:
+                return obj.isoformat()
+            except Exception:
+                return str(obj)
+        # bytes
+        if isinstance(obj, (bytes, bytearray)):
+            try:
+                return obj.decode('utf-8', errors='replace')
+            except Exception:
+                return str(obj)
+        # fallback: primitive or JSON-serializable
+        try:
+            json.dumps(obj, ensure_ascii=False)
+            return obj
+        except Exception:
+            return str(obj)
+
     def _simplify_text(self, s: str) -> str:
         """Simplify Arabic text for more robust substring matching.
         Normalizes common letter variants, removes punctuation, and collapses spaces.
@@ -2380,7 +2421,7 @@ class ChatbotService:
                 numbered.append(f"{i}. {n}")
             header += "\n".join(numbered)
             header += "\n\nللاطلاع على تفاصيل منتج، اكتب رقم المنتج (مثال: '1' أو '1 تفاصيل' أو 'رقم 1'). سأقبل الرقم حتى لو كتبته مع كلمات أخرى."
-            data = {"products": products, "summaries": summaries}
+            data = {"products": [self._sanitize_for_response(p) for p in products], "summaries": summaries}
             return (header, data)
         else:
             # No products found - compute clarifying suggestions
@@ -2630,7 +2671,7 @@ class ChatbotService:
             header = f"وجدت {len(products)} منتجًا حسب الشرط"
             header += ":\n• " + "\n• ".join(names)
             header += "\nهل تريد تفاصيل أحد هذه المنتجات؟"
-            data = {"products": products, "summaries": summaries}
+            data = {"products": [self._sanitize_for_response(p) for p in products], "summaries": summaries}
             return (header, data)
         else:
             # If no products, produce clarification similar to search
@@ -2699,7 +2740,7 @@ class ChatbotService:
                 header += f" في فئة {category}"
             header += ":\n• " + "\n• ".join(names)
             header += "\nهل تريد تفاصيل أحد هذه المنتجات؟"
-            data = {"products": products, "summaries": summaries}
+            data = {"products": [self._sanitize_for_response(p) for p in products], "summaries": summaries}
             return (header, data)
         else:
             return ("لم أجد منتجات مناسبة للمعايير المطلوبة.", None)
