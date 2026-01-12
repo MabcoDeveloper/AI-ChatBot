@@ -878,14 +878,20 @@ class ChatbotService:
         # If the user sends a message that includes a number and we have a prior search context, interpret it as a selection
         if user_id in self.search_context and self.search_context.get(user_id):
             # match either western digits or Arabic-Indic digits, allow optional 'رقم' prefix and extra words after the number
+            sel_num = None
+            sel_raw = None
             sel_match = re.search(r'(?:\b|^)\s*(?:رقم\s*)?([0-9\u0660-\u0669]+)', normalized)
             if sel_match:
-                sel_raw = sel_match.group(1)
-                # translate Arabic-Indic digits to western
-                trans = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
-                sel_num = int(sel_raw.translate(trans)) if sel_raw else None
-                summaries = self.search_context[user_id].get('summaries') if isinstance(self.search_context[user_id], dict) else self.search_context[user_id]
-                products = self.search_context[user_id].get('products') if isinstance(self.search_context[user_id], dict) else None
+                # If the message appears to be a price-range query, avoid treating embedded numbers as selection indices
+                if re.search(r'\b(بين|سعر|سعرهن|من|الى|إلى|اقل|اكبر|أقل)\b', normalized):
+                    sel_match = None
+                else:
+                    sel_raw = sel_match.group(1)
+                    # translate Arabic-Indic digits to western
+                    trans = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
+                    sel_num = int(sel_raw.translate(trans)) if sel_raw else None
+                    summaries = self.search_context[user_id].get('summaries') if isinstance(self.search_context[user_id], dict) else self.search_context[user_id]
+                    products = self.search_context[user_id].get('products') if isinstance(self.search_context[user_id], dict) else None
 
                 # If there is an awaiting size selection in state, treat the user's numeric reply as a SIZE CHOICE first
                 st_tmp = _get_state(user_id)
@@ -905,14 +911,7 @@ class ChatbotService:
                             "normalized_message": normalized,
                             "intent": 'clarify',
                             "intent_confidence": 0.60,
-                            "response": f"الاختيار غير صالح للحجم {sel_num}. يرجى كتابة رقم من 1 إلى {len(sizes)}.",
-                            "data": None,
-                            "suggestions": [],
-                            "context_summary": {
-                                "turns_count": len(self.memory.get(user_id, [])),
-                                "last_activity": datetime.now().isoformat(),
-                                "recent_questions": _get_state(user_id).get('recent_questions', [])
-                            },
+                            "response": f"الاختيار غير صالح للحجم {sel_raw or sel_num}. يرجى كتابة رقم من 1 إلى {len(sizes)}.",
                             "timestamp": datetime.now().isoformat()
                         })
 
@@ -1002,7 +1001,7 @@ class ChatbotService:
                                     "normalized_message": normalized,
                                     "intent": 'clarify',
                                     "intent_confidence": 0.60,
-                                    "response": f"الاختيار غير صالح للحجم {sel_num}. يرجى كتابة رقم من 1 إلى {len(sizes)}.",
+                                    "response": f"الاختيار غير صالح للحجم {sel_raw or sel_num}. يرجى كتابة رقم من 1 إلى {len(sizes)}.",
                                     "data": None,
                                     "suggestions": [],
                                     "context_summary": {
@@ -1187,8 +1186,8 @@ class ChatbotService:
                             return self._format_response(user_id, message, normalized, 'buy', 0.95, response_text, data=data, suggestions=["نعم", "لا"], context_summary={"turns_count": len(self.memory.get(user_id, [])), "last_activity": datetime.now().isoformat(), "recent_questions": _get_state(user_id).get('recent_questions', [])})
 
                         # Default: return detail view
-                        resp = f"تفاصيل المنتج ({sel_num}):\n{title}\nالسعر: {prices} {chosen_prod.get('currency','') or ''}\nالتوفر: {availability}\n\n{desc}\n\nلإضافة هذا المنتج إلى السلة اكتب 'اشتري {sel_num}'   ."
-                        return self._format_response(user_id, message, normalized, 'detail', 0.95, resp, data={"product": chosen_prod}, suggestions=["اشتري {}".format(sel_num), "شاهد منتجات مشابهة"], context_summary={"turns_count": len(self.memory.get(user_id, [])), "last_activity": datetime.now().isoformat(), "recent_questions": _get_state(user_id).get('recent_questions', [])})
+                        resp = f"تفاصيل المنتج ({sel_raw or sel_num}):\n{title}\nالسعر: {prices} {chosen_prod.get('currency','') or ''}\nالتوفر: {availability}\n\n{desc}\n\nلإضافة هذا المنتج إلى السلة اكتب 'اشتري {sel_raw or sel_num}'   ."
+                        return self._format_response(user_id, message, normalized, 'detail', 0.95, resp, data={"product": chosen_prod}, suggestions=["اشتري {}".format(sel_raw or sel_num), "شاهد منتجات مشابهة"], context_summary={"turns_count": len(self.memory.get(user_id, [])), "last_activity": datetime.now().isoformat(), "recent_questions": _get_state(user_id).get('recent_questions', [])})
                 # If number found but out of range, clarify
                 if sel_num:
                     return ({
@@ -1197,7 +1196,7 @@ class ChatbotService:
                         "normalized_message": normalized,
                         "intent": 'clarify',
                         "intent_confidence": 0.60,
-                        "response": f"لم أجد خيارًا بالرقم {sel_num}. يرجى كتابة رقم من 1 إلى {len(summaries) if summaries else 0}.",
+                        "response": f"لم أجد خيارًا بالرقم {sel_raw or sel_num}. يرجى كتابة رقم من 1 إلى {len(summaries) if summaries else 0}.",
                         "data": None,
                         "suggestions": [],
                         "context_summary": {
@@ -2348,10 +2347,29 @@ class ChatbotService:
                     q_norm_short = re.sub(r'[^\u0600-\u06FF\s]', '', q_norm_short)
                 is_generic_category_request = (not q_norm_short or len(q_norm_short.split()) <= 1)
                 # If the query mentions a product-type keyword (Arabic) and a category was detected,
-                # treat it as a generic category/type browse (e.g., 'اريد زيت للشعر').
-                arabic_type_keywords = ['زيت', 'شامبو', 'كريم', 'سيروم', 'بلسم', 'قناع', 'سبراي', 'جل', 'لوشن', 'مصل']
-                if category and any(k in (query or '') for k in arabic_type_keywords):
-                    is_generic_category_request = True
+                # treat it as a generic category/type browse only when the remaining query is empty or very short.
+                # Use dynamic keywords derived from the database to stay in sync with product types/titles.
+                type_keywords = self._get_type_keywords()
+                if category and type_keywords:
+                    matched = None
+                    for k in type_keywords:
+                        try:
+                            if re.search(r'\b' + re.escape(k) + r'\b', (query or ''), flags=re.IGNORECASE):
+                                matched = k
+                                break
+                        except Exception:
+                            continue
+                    if matched:
+                        # only treat as generic if remaining short/empty after removing filter words
+                        if not q_norm_short or len(q_norm_short.split()) <= 1:
+                            is_generic_category_request = True
+                        else:
+                            # if the matched token equals the remaining phrase, treat as generic
+                            if matched == q_norm_short.strip():
+                                is_generic_category_request = True
+                            else:
+                                # user included modifiers (e.g., 'زيت جوز الهند') — treat as query-based
+                                is_generic_category_request = False
 
                 # If generic, list category/type products directly
                 if is_generic_category_request:
@@ -2525,6 +2543,51 @@ class ChatbotService:
                 logger.debug(f"Clarify suggestion failed: {e}")
 
             return ("لم أجد منتجات تطابق طلبك. هل تريد أن أجرب كلمات بحث أخرى؟", None)
+
+    def _get_type_keywords(self, refresh: bool = False) -> List[str]:
+        """Return a list of product-type keywords derived from the DB.
+        Caches results in-memory for performance. If refresh=True, force reload.
+        """
+        ttl_seconds = 300
+        now = datetime.utcnow()
+        cache = getattr(self, '_type_keywords_cache', None)
+        if cache and not refresh:
+            if (now - cache.get('ts')).total_seconds() < ttl_seconds:
+                return cache.get('keywords', [])
+        # Build keyword set from distinct 'type' fields and high-frequency title prefixes
+        keywords = set()
+        try:
+            types = [t for t in mongo_service.products.distinct('attributes.type') if t] + [t for t in mongo_service.products.distinct('type') if t]
+            for t in types:
+                if isinstance(t, str) and t.strip():
+                    keywords.add(t.strip())
+            # Also extract common first-word and two-word prefixes from Arabic titles
+            titles = mongo_service.products.find({}, {'title_ar': 1, 'title': 1})
+            prefix_counts = {}
+            for doc in titles:
+                name = doc.get('title_ar') or doc.get('title') or ''
+                if not name:
+                    continue
+                name = self._simplify_text(name)
+                parts = [p for p in name.split() if len(p) > 1]
+                if not parts:
+                    continue
+                # first word
+                prefix = parts[0]
+                prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
+                # first two words
+                if len(parts) >= 2:
+                    prefix2 = prefix + ' ' + parts[1]
+                    prefix_counts[prefix2] = prefix_counts.get(prefix2, 0) + 1
+            # accept prefixes that appear more than once
+            for p, cnt in prefix_counts.items():
+                if cnt >= 2:
+                    keywords.add(p)
+        except Exception:
+            pass
+        kw_list = sorted([k for k in keywords if k], key=lambda x: -len(x))
+        setattr(self, '_type_keywords_cache', {'keywords': kw_list, 'ts': now})
+        return kw_list
 
     def _parse_price_range(self, query: str) -> Dict[str, Optional[float]]:
         """Parse price range or single price expressions from Arabic or English text.
